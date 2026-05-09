@@ -1,6 +1,7 @@
 # pump-swap-sdk
 
-[![CI](https://github.com/v0idum/pump-swap-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/v0idum/pump-swap-sdk/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/pump-swap-sdk.svg)](https://crates.io/crates/pump-swap-sdk)
+[![Docs.rs](https://docs.rs/pump-swap-sdk/badge.svg)](https://docs.rs/pump-swap-sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml)
 
