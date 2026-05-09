@@ -1,1 +1,10 @@
 /target
+/.claude
+/.idea
+/.vscode
+.DS_Store
+*.local.json
+*.config.json
+secrets.json
+.env
+.env.*
