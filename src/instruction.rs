@@ -1,6 +1,6 @@
 use crate::constants::{
-    EVENT_AUTHORITY, FEE_PROGRAM, GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR, PUMPFUN_EVENT_AUTHORITY,
-    PUMPFUN_PROGRAM, PUMP_CREATOR_VAULT, PUMP_SWAP_PROGRAM_ID, WRAPPED_SOL_MINT,
+    EVENT_AUTHORITY, FEE_PROGRAM, GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR, PUMP_CREATOR_VAULT,
+    PUMP_SWAP_PROGRAM_ID, PUMPFUN_EVENT_AUTHORITY, PUMPFUN_PROGRAM, WRAPPED_SOL_MINT,
 };
 use crate::state::PoolInfo;
 use crate::util::{
@@ -358,15 +358,17 @@ pub fn withdraw_instruction(
     min_base_amount_out: u64,
     min_quote_amount_out: u64,
 ) -> Result<Instruction> {
-    let data =
-        WithdrawInstruction::new(lp_token_amount_in, min_base_amount_out, min_quote_amount_out)
-            .to_vec();
+    let data = WithdrawInstruction::new(
+        lp_token_amount_in,
+        min_base_amount_out,
+        min_quote_amount_out,
+    )
+    .to_vec();
 
     let lp_mint = calc_lp_mint_pda(pool).0;
     let user_pool_token_account = calc_user_pool_token_account(user, &lp_mint).0;
 
-    let pool_base_ata =
-        spl_associated_token_account::get_associated_token_address(pool, base_mint);
+    let pool_base_ata = spl_associated_token_account::get_associated_token_address(pool, base_mint);
     let pool_quote_ata =
         spl_associated_token_account::get_associated_token_address(pool, &WRAPPED_SOL_MINT);
 
@@ -450,4 +452,98 @@ pub fn distribute_creator_fees_instruction(
         accounts,
         data: vec![165, 114, 103, 0, 121, 206, 247, 81],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pk(byte: u8) -> Pubkey {
+        Pubkey::new_from_array([byte; 32])
+    }
+
+    fn pool_info(coin_creator: Pubkey, is_cashback_coin: bool) -> PoolInfo {
+        PoolInfo {
+            pool: pk(1),
+            base_mint: pk(2),
+            quote_mint: WRAPPED_SOL_MINT,
+            lp_mint: pk(3),
+            pool_base_token_account: pk(4),
+            pool_quote_token_account: pk(5),
+            creator: pk(6),
+            coin_creator,
+            is_cashback_coin,
+            base_token_program: spl_token::ID,
+            quote_token_program: spl_token::ID,
+        }
+    }
+
+    #[test]
+    fn swap_instruction_account_counts_include_required_remaining_accounts() {
+        let user = pk(7);
+        let user_base_ata = pk(8);
+        let user_quote_ata = pk(9);
+
+        let classic = pool_info(Pubkey::default(), false);
+        assert_eq!(
+            make_buy_instruction(1, 2, &classic, &user, &user_base_ata, &user_quote_ata)
+                .unwrap()
+                .accounts
+                .len(),
+            25
+        );
+        assert_eq!(
+            make_sell_instruction(1, 2, &classic, &user, &user_base_ata, &user_quote_ata)
+                .unwrap()
+                .accounts
+                .len(),
+            23
+        );
+
+        let creator_pool = pool_info(pk(10), false);
+        assert_eq!(
+            make_buy_instruction(1, 2, &creator_pool, &user, &user_base_ata, &user_quote_ata)
+                .unwrap()
+                .accounts
+                .len(),
+            26
+        );
+        assert_eq!(
+            make_sell_instruction(1, 2, &creator_pool, &user, &user_base_ata, &user_quote_ata)
+                .unwrap()
+                .accounts
+                .len(),
+            24
+        );
+
+        let cashback_creator_pool = pool_info(pk(10), true);
+        assert_eq!(
+            make_buy_instruction(
+                1,
+                2,
+                &cashback_creator_pool,
+                &user,
+                &user_base_ata,
+                &user_quote_ata,
+            )
+            .unwrap()
+            .accounts
+            .len(),
+            27
+        );
+        assert_eq!(
+            make_sell_instruction(
+                1,
+                2,
+                &cashback_creator_pool,
+                &user,
+                &user_base_ata,
+                &user_quote_ata,
+            )
+            .unwrap()
+            .accounts
+            .len(),
+            26
+        );
+    }
 }

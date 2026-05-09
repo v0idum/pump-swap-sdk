@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
-use solana_sdk::pubkey::Pubkey;
 use serde::Serialize;
+use solana_sdk::pubkey::Pubkey;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable, Serialize)]

@@ -2,6 +2,7 @@
 name = "pump-swap-sdk"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "SDK to interact with the PumpSwap (pump-amm) AMM protocol on Solana"
 license = "MIT"
 readme = "README.md"

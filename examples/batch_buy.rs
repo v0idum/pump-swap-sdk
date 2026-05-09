@@ -19,16 +19,16 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::Transaction;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
-use pump_swap_sdk::{calc_amount_out, send_jito_bundle, JitoPool, PumpSwapClient};
+use pump_swap_sdk::{JitoPool, PumpSwapClient, calc_amount_out, send_jito_bundle};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -74,7 +74,13 @@ async fn main() -> Result<()> {
             ComputeBudgetInstruction::set_compute_unit_limit(1_000_000),
             ComputeBudgetInstruction::set_compute_unit_price(100_000),
         ];
-        ixs.extend(client.build_buy_ixs(amount_out, amount_in, &pool_info, &payer.pubkey(), true)?);
+        ixs.extend(client.build_buy_ixs(
+            amount_out,
+            amount_in,
+            &pool_info,
+            &payer.pubkey(),
+            true,
+        )?);
         let mut tx = Transaction::new_with_payer(&ixs, Some(&payer.pubkey()));
         tx.sign(&[payer], rpc.get_latest_blockhash().await?);
 
@@ -97,7 +103,9 @@ fn parse_keypairs(csv: &str) -> Result<Vec<Keypair>> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
-            let bytes = solana_sdk::bs58::decode(s).into_vec().context("base58 decode")?;
+            let bytes = solana_sdk::bs58::decode(s)
+                .into_vec()
+                .context("base58 decode")?;
             Keypair::from_bytes(&bytes).map_err(|e| anyhow!("keypair: {e}"))
         })
         .collect()
@@ -105,9 +113,15 @@ fn parse_keypairs(csv: &str) -> Result<Vec<Keypair>> {
 
 fn parse_jito_pool() -> Option<Arc<JitoPool>> {
     let endpoints = std::env::var("JITO_ENDPOINTS").ok()?;
-    let refs: Vec<&str> = endpoints.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let refs: Vec<&str> = endpoints
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     if refs.is_empty() {
         return None;
     }
-    Some(Arc::new(JitoPool::new(&refs, None, Duration::from_millis(0))))
+    Some(Arc::new(
+        JitoPool::new(&refs, None, Duration::from_millis(0)).ok()?,
+    ))
 }

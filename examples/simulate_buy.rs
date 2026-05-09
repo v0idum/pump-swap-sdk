@@ -17,7 +17,7 @@ use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 
-use pump_swap_sdk::{load_pool, PumpSwapClient};
+use pump_swap_sdk::{PumpSwapClient, load_pool};
 
 #[tokio::main]
 async fn main() -> Result<()> {

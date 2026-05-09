@@ -1,13 +1,15 @@
-use crate::constants::{BUYBACK_FEE_RECIPIENTS, FEE_PROGRAM, PROTOCOL_FEE_RECIPIENTS, PUMP_SWAP_PROGRAM_ID};
-use rand::seq::IndexedRandom;
+use crate::constants::{
+    BUYBACK_FEE_RECIPIENTS, FEE_PROGRAM, PROTOCOL_FEE_RECIPIENTS, PUMP_SWAP_PROGRAM_ID,
+};
 use crate::state::{Pool, PoolInfo};
-use anyhow::{anyhow, Result};
-use base64::engine::general_purpose;
+use anyhow::{Result, anyhow};
 use base64::Engine as _;
+use base64::engine::general_purpose;
 use bytemuck::from_bytes;
 use jito_sdk_rust::JitoJsonRpcSDK;
 use log::info;
 use rand::RngCore;
+use rand::seq::IndexedRandom;
 use serde_json::json;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::bs58;
@@ -15,8 +17,8 @@ use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::Transaction;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
@@ -32,18 +34,26 @@ pub struct JitoPool {
 }
 
 impl JitoPool {
-    pub fn new(endpoints: &[&str], uuid: Option<String>, interval: Duration) -> Self {
+    /// Build a round-robin Jito client pool.
+    ///
+    /// Returns an error when `endpoints` is empty so callers fail during
+    /// configuration instead of panicking on the first send attempt.
+    pub fn new(endpoints: &[&str], uuid: Option<String>, interval: Duration) -> Result<Self> {
+        if endpoints.is_empty() {
+            anyhow::bail!("JitoPool requires at least one endpoint");
+        }
+
         let clients = endpoints
             .iter()
             .map(|b| Arc::new(JitoJsonRpcSDK::new(&format!("{}/api/v1", b), uuid.clone())))
             .collect::<Vec<_>>();
         let last = Mutex::new(vec![Instant::now(); clients.len()]);
-        Self {
+        Ok(Self {
             clients,
             last,
             interval,
             rr: AtomicUsize::new(0),
-        }
+        })
     }
 
     /// Returns the next available client (round-robin, 1 call = 1 reservation).
@@ -228,7 +238,11 @@ pub fn calc_lp_mint_pda(pool: &Pubkey) -> (Pubkey, u8) {
 /// User's LP token account (Token-2022 ATA over `(creator, lp_mint)`).
 pub fn calc_user_pool_token_account(creator: &Pubkey, lp_mint: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(
-        &[creator.as_ref(), spl_token_2022::ID.as_ref(), lp_mint.as_ref()],
+        &[
+            creator.as_ref(),
+            spl_token_2022::ID.as_ref(),
+            lp_mint.as_ref(),
+        ],
         &spl_associated_token_account::ID,
     )
 }
@@ -252,7 +266,10 @@ pub async fn send_jito_bundle(txs: Vec<Transaction>, jito_sdk: Arc<JitoJsonRpcSD
         .collect::<Result<Vec<_>>>()?;
     let bundle = json!(serialized_txs);
     let params = json!([bundle, { "encoding": "base64" }]);
-    info!("Sending bundle with {} transaction(s)...", serialized_txs.len());
+    info!(
+        "Sending bundle with {} transaction(s)...",
+        serialized_txs.len()
+    );
     let response = jito_sdk.send_bundle(Some(params), None).await?;
     let bundle_uuid = response["result"]
         .as_str()
@@ -277,7 +294,11 @@ pub async fn send_bundle_with_retry(
             Err(e) => {
                 attempt += 1;
                 if attempt >= max_retries {
-                    return Err(anyhow!("Failed to send after {} retries: {:?}", max_retries, e));
+                    return Err(anyhow!(
+                        "Failed to send after {} retries: {:?}",
+                        max_retries,
+                        e
+                    ));
                 }
                 info!("Send failed, retry {}/{}", attempt, max_retries);
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -363,4 +384,14 @@ pub fn pick_buyback_fee_recipient() -> Pubkey {
     *BUYBACK_FEE_RECIPIENTS
         .choose(&mut rand::rng())
         .expect("BUYBACK_FEE_RECIPIENTS is non-empty")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jito_pool_rejects_empty_endpoint_list() {
+        assert!(JitoPool::new(&[], None, Duration::from_millis(0)).is_err());
+    }
 }

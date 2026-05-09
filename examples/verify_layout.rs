@@ -22,7 +22,7 @@ use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 
-use pump_swap_sdk::{calc_amount_out, PumpSwapClient};
+use pump_swap_sdk::{PumpSwapClient, calc_amount_out};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,8 +55,12 @@ async fn main() -> Result<()> {
     let amount_in = sol_to_lamports(0.01);
     let base_amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, 0.1);
     println!("buy_amount_in={amount_in} base_amount_out={base_amount_out}");
-    let buy_ixs = client.build_buy_ixs(base_amount_out, amount_in, &pool_info, &user_pubkey, true)?;
-    println!("\nBUY: {} accounts in pump-amm ix", buy_ixs[buy_ixs.len() - 2].accounts.len());
+    let buy_ixs =
+        client.build_buy_ixs(base_amount_out, amount_in, &pool_info, &user_pubkey, true)?;
+    println!(
+        "\nBUY: {} accounts in pump-amm ix",
+        buy_ixs[buy_ixs.len() - 2].accounts.len()
+    );
 
     let msg = Message::new(&buy_ixs, Some(&user_pubkey));
     let mut tx = Transaction::new_unsigned(msg);
@@ -92,7 +96,10 @@ async fn main() -> Result<()> {
     // Sell: 1k base units, 0 minimum quote out — pure layout check.
     let amount_in_base: u64 = 1_000;
     let sell_ixs = client.build_sell_ixs(amount_in_base, 0, &pool_info, &user_pubkey, false)?;
-    println!("\nSELL: {} accounts in pump-amm ix", sell_ixs[sell_ixs.len() - 2].accounts.len());
+    println!(
+        "\nSELL: {} accounts in pump-amm ix",
+        sell_ixs[sell_ixs.len() - 2].accounts.len()
+    );
 
     let msg = Message::new(&sell_ixs, Some(&user_pubkey));
     let mut tx = Transaction::new_unsigned(msg);

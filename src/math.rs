@@ -21,7 +21,12 @@ pub fn buy_amount_out(amount_in: u64, reserves: (u64, u64), pool: &PoolInfo, sli
     }
 }
 
-pub fn sell_amount_out(amount_in: u64, reserves: (u64, u64), pool: &PoolInfo, slippage: f64) -> u64 {
+pub fn sell_amount_out(
+    amount_in: u64,
+    reserves: (u64, u64),
+    pool: &PoolInfo,
+    slippage: f64,
+) -> u64 {
     if pool.base_mint != WRAPPED_SOL_MINT {
         calc_amount_out(amount_in, reserves.0, reserves.1, slippage)
     } else {

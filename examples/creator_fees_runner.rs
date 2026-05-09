@@ -28,7 +28,7 @@ use solana_sdk::system_instruction;
 use solana_sdk::transaction::Transaction;
 
 use pump_swap_sdk::{
-    find_coin_creator_vault_authority, get_token_balance, PumpSwapClient, WRAPPED_SOL_MINT,
+    PumpSwapClient, WRAPPED_SOL_MINT, find_coin_creator_vault_authority, get_token_balance,
 };
 
 #[tokio::main]
@@ -57,15 +57,22 @@ async fn main() -> Result<()> {
     let client = PumpSwapClient::new(&rpc);
 
     let vault_authority = find_coin_creator_vault_authority(&coin_creator);
-    let claimable_lamports = get_token_balance(&rpc, &vault_authority, &WRAPPED_SOL_MINT, &spl_token::ID)
-        .await?
-        .unwrap_or(0);
+    let claimable_lamports =
+        get_token_balance(&rpc, &vault_authority, &WRAPPED_SOL_MINT, &spl_token::ID)
+            .await?
+            .unwrap_or(0);
     let claimable_sol = lamports_to_sol(claimable_lamports);
     println!("vault claimable: {claimable_sol} SOL");
 
     if claimable_sol >= min_claimable_sol {
         client
-            .withdraw_creator_fees(&admin, &coin_creator, &token_mint, &bonding_curve, &sharing_config)
+            .withdraw_creator_fees(
+                &admin,
+                &coin_creator,
+                &token_mint,
+                &bonding_curve,
+                &sharing_config,
+            )
             .await?;
         println!("claimed creator fees");
     } else {

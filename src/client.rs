@@ -9,7 +9,7 @@ use crate::util::{
     calc_lp_mint_pda, calc_pool_pda, calc_user_pool_token_account,
     create_ata_token_or_not_with_program, gen_pubkey_with_seed, load_pool,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use log::{debug, info};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
@@ -23,7 +23,7 @@ use spl_associated_token_account::instruction::create_associated_token_account_i
 use spl_token::instruction::{close_account as spl_token_close_account, initialize_account};
 use spl_token::solana_program::program_pack::Pack;
 use std::ops::Deref;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// Async client wrapping an [`RpcClient`] with high-level pump-amm helpers.
 ///
@@ -67,10 +67,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// Fetch pool reserves with both UI and base-unit amounts. Retries with
     /// exponential backoff up to ~6s; returns an error if the RPC remains
     /// unavailable.
-    pub async fn fetch_ui_pooled_amounts(
-        &self,
-        pool: &PoolInfo,
-    ) -> Result<(f64, f64, (u64, u64))> {
+    pub async fn fetch_ui_pooled_amounts(&self, pool: &PoolInfo) -> Result<(f64, f64, (u64, u64))> {
         let mut delay = Duration::from_millis(200);
 
         for _ in 0..6 {
@@ -84,7 +81,8 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
                     .get_token_account_balance(&pool.pool_quote_token_account)
                     .await?;
                 Ok::<_, anyhow::Error>((
-                    base.ui_amount.ok_or_else(|| anyhow!("base ui_amount None"))?,
+                    base.ui_amount
+                        .ok_or_else(|| anyhow!("base ui_amount None"))?,
                     quote
                         .ui_amount
                         .ok_or_else(|| anyhow!("quote ui_amount None"))?,
@@ -119,7 +117,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         let amount_out = calc_amount_out(amount_in, base_reserve, quote_reserve, 0.01);
         debug!("Sell amount out: {}", amount_out);
         let mut tx = Transaction::new_with_payer(
-            &self.build_sell_ixs(amount_in, 0, pool_info, &keypair.pubkey(), true)?,
+            &self.build_sell_ixs(amount_in, amount_out, pool_info, &keypair.pubkey(), true)?,
             Some(&keypair.pubkey()),
         );
         tx.sign(&[keypair], self.rpc.get_latest_blockhash().await?);
@@ -295,12 +293,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// **100,000 micro-lamport CU price**. For custom values, compose your
     /// own transaction from [`Self::build_buy_ixs`] plus your own
     /// `ComputeBudgetInstruction`s.
-    pub async fn buy(
-        &self,
-        amount_in: u64,
-        pool_info: &PoolInfo,
-        payer: &Keypair,
-    ) -> Result<()> {
+    pub async fn buy(&self, amount_in: u64, pool_info: &PoolInfo, payer: &Keypair) -> Result<()> {
         let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
         let amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, 0.05);
         debug!("Buying amount out: {}", amount_out);
@@ -330,12 +323,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// **100,000 micro-lamport CU price**. For custom values, compose your
     /// own transaction from [`Self::build_sell_ixs`] plus your own
     /// `ComputeBudgetInstruction`s.
-    pub async fn sell(
-        &self,
-        amount_in: u64,
-        pool_info: &PoolInfo,
-        payer: &Keypair,
-    ) -> Result<()> {
+    pub async fn sell(&self, amount_in: u64, pool_info: &PoolInfo, payer: &Keypair) -> Result<()> {
         let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
         let amount_out = calc_amount_out(amount_in, base_reserve, quote_reserve, 0.1);
         debug!("Sell amount out: {}", amount_out);
@@ -429,20 +417,19 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         let min_rent_exempt = Rent::default().minimum_balance(span);
 
         // Token side (base mint when quote is WSOL, otherwise quote mint).
-        let (token_mint, wsol_mint, token_program) =
-            if pool_info.base_mint != WRAPPED_SOL_MINT {
-                (
-                    pool_info.base_mint,
-                    pool_info.quote_mint,
-                    pool_info.base_token_program,
-                )
-            } else {
-                (
-                    pool_info.quote_mint,
-                    pool_info.base_mint,
-                    pool_info.quote_token_program,
-                )
-            };
+        let (token_mint, wsol_mint, token_program) = if pool_info.base_mint != WRAPPED_SOL_MINT {
+            (
+                pool_info.base_mint,
+                pool_info.quote_mint,
+                pool_info.base_token_program,
+            )
+        } else {
+            (
+                pool_info.quote_mint,
+                pool_info.base_mint,
+                pool_info.quote_token_program,
+            )
+        };
         instructions.extend(vec![
             system_instruction::create_account_with_seed(
                 payer,
@@ -501,20 +488,19 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);
 
-        let (token_mint, wsol_mint, token_program) =
-            if pool_info.base_mint != WRAPPED_SOL_MINT {
-                (
-                    pool_info.base_mint,
-                    pool_info.quote_mint,
-                    pool_info.base_token_program,
-                )
-            } else {
-                (
-                    pool_info.quote_mint,
-                    pool_info.base_mint,
-                    pool_info.quote_token_program,
-                )
-            };
+        let (token_mint, wsol_mint, token_program) = if pool_info.base_mint != WRAPPED_SOL_MINT {
+            (
+                pool_info.base_mint,
+                pool_info.quote_mint,
+                pool_info.base_token_program,
+            )
+        } else {
+            (
+                pool_info.quote_mint,
+                pool_info.base_mint,
+                pool_info.quote_token_program,
+            )
+        };
         instructions.extend(vec![
             system_instruction::create_account_with_seed(
                 payer,
@@ -528,11 +514,12 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             initialize_account(&spl_token::ID, &wsol_acc, &wsol_mint, payer)?,
         ]);
 
-        let token_ata_in = spl_associated_token_account::get_associated_token_address_with_program_id(
-            payer,
-            &token_mint,
-            &token_program,
-        );
+        let token_ata_in =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                payer,
+                &token_mint,
+                &token_program,
+            );
 
         instructions.push(make_sell_instruction(
             base_amount_in,
@@ -584,13 +571,12 @@ pub async fn get_token_balance(
     match rpc.get_token_account_balance(&token_account).await {
         Ok(balance) => Ok(Some(balance.amount.parse()?)),
         Err(solana_client::client_error::ClientError {
-            kind: solana_client::client_error::ClientErrorKind::RpcError(
-                solana_client::rpc_request::RpcError::ForUser(msg),
-            ),
+            kind:
+                solana_client::client_error::ClientErrorKind::RpcError(
+                    solana_client::rpc_request::RpcError::ForUser(msg),
+                ),
             ..
-        }) if msg.contains("AccountNotFound") || msg.contains("could not find account") => {
-            Ok(None)
-        }
+        }) if msg.contains("AccountNotFound") || msg.contains("could not find account") => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
