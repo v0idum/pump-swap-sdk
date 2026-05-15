@@ -51,12 +51,18 @@ async fn main() -> Result<()> {
     let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
     println!("reserves: base={base_reserve} quote={quote_reserve}");
 
-    // Use 0.01 SOL with realistic slippage so the program math succeeds.
-    let amount_in = sol_to_lamports(0.01);
+    // Small amount so the layout check works against typical test wallets.
+    let amount_in = sol_to_lamports(0.001);
     let base_amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, 0.1);
     println!("buy_amount_in={amount_in} base_amount_out={base_amount_out}");
-    let buy_ixs =
-        client.build_buy_ixs(base_amount_out, amount_in, &pool_info, &user_pubkey, true)?;
+    let buy_ixs = client.build_buy_ixs(
+        base_amount_out,
+        amount_in,
+        true,
+        &pool_info,
+        &user_pubkey,
+        true,
+    )?;
     println!(
         "\nBUY: {} accounts in pump-amm ix",
         buy_ixs[buy_ixs.len() - 2].accounts.len()
@@ -91,6 +97,38 @@ async fn main() -> Result<()> {
         for line in logs {
             println!("  {line}");
         }
+    }
+
+    // buy_exact_quote_in: small amount, min 1 base out (program rejects 0).
+    let spend = sol_to_lamports(0.001);
+    let bxqi_ixs =
+        client.build_buy_exact_quote_in_ixs(spend, 1, true, &pool_info, &user_pubkey, true)?;
+    println!(
+        "\nBUY_EXACT_QUOTE_IN: {} accounts in pump-amm ix",
+        bxqi_ixs[bxqi_ixs.len() - 2].accounts.len()
+    );
+    let msg = Message::new(&bxqi_ixs, Some(&user_pubkey));
+    let mut tx = Transaction::new_unsigned(msg);
+    tx.message.recent_blockhash = solana_sdk::hash::Hash::default();
+    let result = rpc
+        .simulate_transaction_with_config(
+            &tx,
+            RpcSimulateTransactionConfig {
+                sig_verify: false,
+                replace_recent_blockhash: true,
+                commitment: Some(CommitmentConfig::confirmed()),
+                ..RpcSimulateTransactionConfig::default()
+            },
+        )
+        .await?;
+    println!("\n=== BUY_EXACT_QUOTE_IN SIMULATION ===");
+    if let Some(err) = &result.value.err {
+        println!("ERROR: {err:?}");
+    } else {
+        println!("SUCCESS");
+    }
+    if let Some(units) = result.value.units_consumed {
+        println!("compute units: {units}");
     }
 
     // Sell: 1k base units, 0 minimum quote out — pure layout check.

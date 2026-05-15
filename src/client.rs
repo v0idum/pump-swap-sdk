@@ -1,7 +1,9 @@
 use crate::constants::{PUMP_SWAP_PROGRAM_ID, WRAPPED_SOL_MINT};
 use crate::instruction::{
-    create_pool_instruction, distribute_creator_fees_instruction, make_buy_instruction,
-    make_sell_instruction, transfer_creator_fees_to_pump_instruction, withdraw_instruction,
+    create_pool_instruction, distribute_creator_fees_instruction,
+    make_buy_exact_quote_in_instruction, make_buy_instruction, make_claim_cashback_instruction,
+    make_deposit_instruction, make_sell_instruction, transfer_creator_fees_to_pump_instruction,
+    withdraw_instruction,
 };
 use crate::math::calc_amount_out;
 use crate::state::PoolInfo;
@@ -145,6 +147,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             &self.build_buy_ixs(
                 base_amount_out,
                 amount_in,
+                true, // track_volume
                 pool_info,
                 &keypair.pubkey(),
                 true,
@@ -305,6 +308,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         instructions.extend(self.build_buy_ixs(
             amount_out,
             amount_in,
+            true, // track_volume
             pool_info,
             &payer.pubkey(),
             false,
@@ -314,6 +318,161 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         tx.sign(&[payer], self.rpc.get_latest_blockhash().await?);
         let result = self.rpc.send_and_confirm_transaction(&tx).await?;
         info!("Buy tx: {}", result);
+        Ok(())
+    }
+
+    /// Submit a `buy_exact_quote_in` transaction (full send-and-confirm).
+    ///
+    /// "Spend exactly `spendable_quote_in` of quote (e.g. SOL), accept any
+    /// base amount ≥ `min_base_amount_out`." Convenience wrapper using
+    /// **1,000,000 CU limit** and **100,000 micro-lamport CU price**, with
+    /// `track_volume = true` so the trade counts toward cashback. For custom
+    /// values, compose via [`Self::build_buy_exact_quote_in_ixs`].
+    pub async fn buy_exact_quote_in(
+        &self,
+        spendable_quote_in: u64,
+        min_base_amount_out: u64,
+        pool_info: &PoolInfo,
+        payer: &Keypair,
+    ) -> Result<()> {
+        debug!(
+            "buy_exact_quote_in: spend={} min_out={}",
+            spendable_quote_in, min_base_amount_out
+        );
+        let mut instructions: Vec<Instruction> = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(1_000_000),
+            ComputeBudgetInstruction::set_compute_unit_price(100_000),
+        ];
+        instructions.extend(self.build_buy_exact_quote_in_ixs(
+            spendable_quote_in,
+            min_base_amount_out,
+            true, // track_volume
+            pool_info,
+            &payer.pubkey(),
+            false,
+        )?);
+        let mut tx = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
+        tx.sign(&[payer], self.rpc.get_latest_blockhash().await?);
+        let result = self.rpc.send_and_confirm_transaction(&tx).await?;
+        info!("buy_exact_quote_in tx: {}", result);
+        Ok(())
+    }
+
+    /// Simulate a `buy_exact_quote_in` against the connected RPC.
+    ///
+    /// Uses `track_volume = true` to match real on-chain behavior; pass a
+    /// `min_base_amount_out` of 0 to ignore slippage in simulation.
+    pub async fn simulate_buy_exact_quote_in(
+        &self,
+        spendable_quote_in: u64,
+        min_base_amount_out: u64,
+        pool_info: &PoolInfo,
+        keypair: &Keypair,
+    ) -> Result<()> {
+        let mut tx = Transaction::new_with_payer(
+            &self.build_buy_exact_quote_in_ixs(
+                spendable_quote_in,
+                min_base_amount_out,
+                true,
+                pool_info,
+                &keypair.pubkey(),
+                true,
+            )?,
+            Some(&keypair.pubkey()),
+        );
+        tx.sign(&[keypair], self.rpc.get_latest_blockhash().await?);
+        let result = self.rpc.simulate_transaction(&tx).await?;
+        info!("Simulation result: {:?}", result);
+        Ok(())
+    }
+
+    /// Claim accrued cashback for `payer`. The user's
+    /// `user_volume_accumulator` and its quote-mint ATA must already exist
+    /// (they're created by the buy / buy_exact_quote_in flow when
+    /// `track_volume = true`).
+    pub async fn claim_cashback(
+        &self,
+        quote_mint: &Pubkey,
+        quote_token_program: &Pubkey,
+        payer: &Keypair,
+    ) -> Result<()> {
+        let ix = make_claim_cashback_instruction(&payer.pubkey(), quote_mint, quote_token_program)?;
+        let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+        tx.sign(&[payer], self.rpc.get_latest_blockhash().await?);
+        let result = self.rpc.send_and_confirm_transaction(&tx).await?;
+        info!("claim_cashback tx: {}", result);
+        Ok(())
+    }
+
+    /// Deposit liquidity into a pool, minting `lp_token_amount_out` LP
+    /// tokens. The caller's base, quote, and pool-LP ATAs are created
+    /// idempotently before the deposit instruction.
+    ///
+    /// Convenience wrapper for WSOL-quoted pools — for other quote mints
+    /// compose via [`make_deposit_instruction`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn deposit_into_wsol_pool(
+        &self,
+        pool_info: &PoolInfo,
+        payer: &Keypair,
+        lp_token_amount_out: u64,
+        max_base_amount_in: u64,
+        max_quote_amount_in: u64,
+    ) -> Result<()> {
+        let wallet = payer.pubkey();
+        let base_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+            &wallet,
+            &pool_info.base_mint,
+            &pool_info.base_token_program,
+        );
+        let wsol_ata =
+            spl_associated_token_account::get_associated_token_address(&wallet, &WRAPPED_SOL_MINT);
+        let user_lp_ata = calc_user_pool_token_account(&wallet, &pool_info.lp_mint).0;
+
+        let base_ata_ix = create_associated_token_account_idempotent(
+            &wallet,
+            &wallet,
+            &pool_info.base_mint,
+            &pool_info.base_token_program,
+        );
+        let wsol_ata_ix = create_associated_token_account_idempotent(
+            &wallet,
+            &wallet,
+            &WRAPPED_SOL_MINT,
+            &spl_token::ID,
+        );
+        let lp_ata_ix = create_associated_token_account_idempotent(
+            &wallet,
+            &wallet,
+            &pool_info.lp_mint,
+            &spl_token_2022::ID,
+        );
+
+        let deposit_ix = make_deposit_instruction(
+            lp_token_amount_out,
+            max_base_amount_in,
+            max_quote_amount_in,
+            pool_info,
+            &wallet,
+            &base_ata,
+            &wsol_ata,
+            &user_lp_ata,
+        )?;
+
+        let instructions = vec![
+            base_ata_ix,
+            wsol_ata_ix,
+            system_instruction::transfer(&wallet, &wsol_ata, max_quote_amount_in),
+            spl_token::instruction::sync_native(&spl_token::ID, &wsol_ata)?,
+            lp_ata_ix,
+            deposit_ix,
+            spl_token_close_account(&spl_token::ID, &wsol_ata, &wallet, &wallet, &[])?,
+        ];
+
+        let mut tx = Transaction::new_with_payer(&instructions, Some(&wallet));
+        tx.sign(&[payer], self.rpc.get_latest_blockhash().await?);
+        let result = self.rpc.send_and_confirm_transaction(&tx).await?;
+        info!("deposit tx: {}", result);
         Ok(())
     }
 
@@ -400,13 +559,18 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         ])
     }
 
-    /// Build the instruction sequence for a buy: a fresh seed-derived WSOL
-    /// account, optional ATA creation for the base mint, the buy ix, and a
-    /// close of the WSOL account back to lamports.
+    /// Build the instruction sequence for a buy (exact-base-out): a fresh
+    /// seed-derived WSOL account, optional ATA creation for the base mint,
+    /// the buy ix, and a close of the WSOL account back to lamports.
+    ///
+    /// `track_volume = true` makes the trade count toward the caller's
+    /// cashback accumulator — set `false` only if you explicitly don't want
+    /// it tracked.
     pub fn build_buy_ixs(
         &self,
         base_amount_out: u64,
         max_quote_amount_in: u64,
+        track_volume: bool,
         pool_info: &PoolInfo,
         payer: &Pubkey,
         create_ata: bool,
@@ -457,6 +621,81 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         instructions.push(make_buy_instruction(
             base_amount_out,
             max_quote_amount_in,
+            track_volume,
+            pool_info,
+            payer,
+            &ata_acc,
+            &wsol_acc,
+        )?);
+        instructions.push(spl_token_close_account(
+            &spl_token::ID,
+            &wsol_acc,
+            payer,
+            payer,
+            &[],
+        )?);
+        Ok(instructions)
+    }
+
+    /// Build the instruction sequence for a `buy_exact_quote_in` (exact-quote-in):
+    /// fresh WSOL account funded with `spendable_quote_in`, optional base-mint
+    /// ATA creation, the buy ix, and a close of the WSOL account. Most trader
+    /// bots want this entry point — "spend exactly N quote, accept ≥ min base".
+    pub fn build_buy_exact_quote_in_ixs(
+        &self,
+        spendable_quote_in: u64,
+        min_base_amount_out: u64,
+        track_volume: bool,
+        pool_info: &PoolInfo,
+        payer: &Pubkey,
+        create_ata: bool,
+    ) -> Result<Vec<Instruction>> {
+        let mut instructions: Vec<Instruction> = Vec::new();
+        let (wsol_acc, seed) = gen_pubkey_with_seed(payer)?;
+        let span = spl_token::state::Account::LEN;
+        let min_rent_exempt = Rent::default().minimum_balance(span);
+
+        let (token_mint, wsol_mint, token_program) = if pool_info.base_mint != WRAPPED_SOL_MINT {
+            (
+                pool_info.base_mint,
+                pool_info.quote_mint,
+                pool_info.base_token_program,
+            )
+        } else {
+            (
+                pool_info.quote_mint,
+                pool_info.base_mint,
+                pool_info.quote_token_program,
+            )
+        };
+        instructions.extend(vec![
+            system_instruction::create_account_with_seed(
+                payer,
+                &wsol_acc,
+                payer,
+                &seed,
+                min_rent_exempt + spendable_quote_in,
+                span as u64,
+                &spl_token::ID,
+            ),
+            initialize_account(&spl_token::ID, &wsol_acc, &wsol_mint, payer)?,
+        ]);
+
+        let (ata_acc, ata_acc_inst) = create_ata_token_or_not_with_program(
+            payer,
+            &token_mint,
+            payer,
+            &token_program,
+            create_ata,
+        );
+        if let Some(ata_inst) = ata_acc_inst {
+            instructions.push(ata_inst);
+        }
+
+        instructions.push(make_buy_exact_quote_in_instruction(
+            spendable_quote_in,
+            min_base_amount_out,
+            track_volume,
             pool_info,
             payer,
             &ata_acc,

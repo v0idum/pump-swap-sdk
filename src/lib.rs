@@ -45,9 +45,11 @@ pub use constants::{
     PUMPFUN_PROGRAM, WRAPPED_SOL_MINT,
 };
 pub use instruction::{
-    BuyInstruction, CreatePoolInstruction, SellInstruction, WithdrawInstruction,
-    create_pool_instruction, distribute_creator_fees_instruction, make_buy_instruction,
-    make_sell_instruction, transfer_creator_fees_to_pump_instruction, withdraw_instruction,
+    BuyExactQuoteInInstruction, BuyInstruction, ClaimCashbackInstruction, CreatePoolInstruction,
+    DepositInstruction, SellInstruction, WithdrawInstruction, create_pool_instruction,
+    distribute_creator_fees_instruction, make_buy_exact_quote_in_instruction, make_buy_instruction,
+    make_claim_cashback_instruction, make_deposit_instruction, make_sell_instruction,
+    transfer_creator_fees_to_pump_instruction, withdraw_instruction,
 };
 pub use math::{buy_amount_out, calc_amount_out, sell_amount_out};
 pub use state::{Pool, PoolInfo};

@@ -5,23 +5,32 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml)
 
-Rust SDK for building and submitting [PumpSwap (pump-amm)](https://swap.pump.fun/)
-AMM instructions on Solana.
+Rust SDK for [Pump.fun's PumpSwap (pump-amm)](https://swap.pump.fun/) AMM on
+Solana.
 
-This crate focuses on the moving parts that are easy to get wrong when talking
-to the live pump-amm program: account layouts, PDA derivation, Token-2022
-associated token accounts, creator-fee accounts, cashback/buyback accounts,
-quote math, and optional Jito bundle submission.
+A small, focused library for building Solana applications on top of
+PumpSwap — trading, providing liquidity, claiming creator fees, anything
+the protocol supports.
 
-## What it supports
+- **Focused** — one library, one protocol; every public API maps to a
+  pump-amm concept.
+- **Current** — tracks the live program's account layout, not a snapshot
+  of last year's IDL.
+- **Ergonomic** — pass a pool pubkey, get back a working transaction.
+- **Composable** — high-level convenience methods or raw instruction
+  builders; bring your own `RpcClient`.
+
+## Features
 
 - Fetching and decoding pump-amm pool accounts into `PoolInfo`.
 - Automatic SPL Token vs SPL Token-2022 detection for each pool mint.
-- Buy and sell instruction builders for the current pump-amm account layouts.
-- Pool creation, withdrawal, and creator-fee distribution instruction helpers.
+- Buy / `buy_exact_quote_in` / sell / deposit / withdraw / claim-cashback
+  instruction builders for the current pump-amm account layouts.
+- Pool creation and creator-fee distribution instruction helpers.
 - Reserve-aware buy/sell quote helpers.
-- High-level `PumpSwapClient` helpers for loading pools, simulating swaps,
-  building transaction instruction sets, and submitting convenience buys/sells.
+- High-level `PumpSwapClient` for loading pools, simulating swaps,
+  building transaction instruction sets, and submitting convenience
+  buys/sells.
 - Jito bundle submission helpers with a round-robin endpoint pool.
 
 ## Install
@@ -30,7 +39,7 @@ Install from crates.io:
 
 ```toml
 [dependencies]
-pump-swap-sdk = "0.1.0"
+pump-swap-sdk = "0.2.0"
 ```
 
 Requires Rust 1.85+.
@@ -47,7 +56,7 @@ client types and an async runtime:
 
 ```toml
 [dependencies]
-pump-swap-sdk = "0.1.0"
+pump-swap-sdk = "0.2.0"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 solana-client = "2"
@@ -132,10 +141,32 @@ let base_amount_out = buy_amount_out(
 let instructions = client.build_buy_ixs(
     base_amount_out,
     amount_in,
+    true, // track_volume — count toward cashback accumulator
     &pool_info,
     &payer.pubkey(),
     true, // create the user's token ATA if missing
 )?;
+```
+
+### Spend-exact-quote buys (`buy_exact_quote_in`)
+
+For "spend exactly N SOL, accept ≥ min base out" semantics — what most
+trader bots want — use the `buy_exact_quote_in` family:
+
+```rust
+use solana_sdk::native_token::sol_to_lamports;
+
+let spend = sol_to_lamports(0.01);
+let instructions = client.build_buy_exact_quote_in_ixs(
+    spend,
+    1, // min_base_amount_out (program rejects 0)
+    true, // track_volume
+    &pool_info,
+    &payer.pubkey(),
+    true,
+)?;
+
+// Or the full convenience: client.buy_exact_quote_in(spend, min_out, &pool_info, &payer).await?;
 ```
 
 ### Build sell instructions
@@ -282,10 +313,18 @@ Generate local API docs with:
 cargo doc --open
 ```
 
-- `PumpSwapClient`: high-level RPC client wrapper.
-- `make_buy_instruction`, `make_sell_instruction`: raw swap instruction
-  builders.
-- `create_pool_instruction`, `withdraw_instruction`,
+- `PumpSwapClient`: high-level RPC client wrapper. Exposes `buy`, `sell`,
+  `buy_exact_quote_in`, `simulate_*`, `deposit_into_wsol_pool`,
+  `withdraw_from_wsol_pool`, `claim_cashback`, `withdraw_creator_fees`, and
+  `create_wsol_pool` convenience methods plus their `build_*_ixs` counterparts.
+- `make_buy_instruction`, `make_buy_exact_quote_in_instruction`,
+  `make_sell_instruction`: raw swap instruction builders. The buy variants
+  take a `track_volume: bool` that accrues cashback eligibility on the
+  caller's `user_volume_accumulator` PDA.
+- `make_deposit_instruction`, `withdraw_instruction`: LP-side builders.
+- `make_claim_cashback_instruction`: pulls accrued cashback for a user from
+  their volume-accumulator PDA.
+- `create_pool_instruction`,
   `transfer_creator_fees_to_pump_instruction`,
   `distribute_creator_fees_instruction`: additional pump-amm and pump.fun
   instruction builders.

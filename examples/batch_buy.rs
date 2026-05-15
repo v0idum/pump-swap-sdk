@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
         ixs.extend(client.build_buy_ixs(
             amount_out,
             amount_in,
+            true, // track_volume
             &pool_info,
             &payer.pubkey(),
             true,

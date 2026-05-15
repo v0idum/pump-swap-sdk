@@ -25,21 +25,71 @@ impl<T: Pod> ToInstructionBytes for T {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+/// pump-amm `buy` instruction args — buy an *exact* amount of base out by
+/// spending up to `max_quote_amount_in` of quote.
+///
+/// On-chain layout: `[discriminator(8) | base_amount_out(8) |
+/// max_quote_amount_in(8) | track_volume(1)]` = 25 bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BuyInstruction {
-    pub discriminator: [u8; 8],
     pub base_amount_out: u64,
     pub max_quote_amount_in: u64,
+    /// Tells the program whether to write this trade's quote-in into the
+    /// caller's `user_volume_accumulator` for cashback / incentive tracking.
+    pub track_volume: bool,
 }
 
 impl BuyInstruction {
-    pub fn new(base_amount_out: u64, max_quote_amount_in: u64) -> Self {
+    pub const DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+
+    pub fn new(base_amount_out: u64, max_quote_amount_in: u64, track_volume: bool) -> Self {
         Self {
-            discriminator: [102, 6, 61, 18, 1, 218, 235, 234],
             base_amount_out,
             max_quote_amount_in,
+            track_volume,
         }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(25);
+        buf.extend_from_slice(&Self::DISCRIMINATOR);
+        buf.extend_from_slice(&self.base_amount_out.to_le_bytes());
+        buf.extend_from_slice(&self.max_quote_amount_in.to_le_bytes());
+        buf.push(self.track_volume as u8);
+        buf
+    }
+}
+
+/// pump-amm `buy_exact_quote_in` instruction args — spend an *exact* amount
+/// of quote, getting at least `min_base_amount_out` of base.
+///
+/// On-chain layout: `[discriminator(8) | spendable_quote_in(8) |
+/// min_base_amount_out(8) | track_volume(1)]` = 25 bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BuyExactQuoteInInstruction {
+    pub spendable_quote_in: u64,
+    pub min_base_amount_out: u64,
+    pub track_volume: bool,
+}
+
+impl BuyExactQuoteInInstruction {
+    pub const DISCRIMINATOR: [u8; 8] = [198, 46, 21, 82, 180, 217, 232, 112];
+
+    pub fn new(spendable_quote_in: u64, min_base_amount_out: u64, track_volume: bool) -> Self {
+        Self {
+            spendable_quote_in,
+            min_base_amount_out,
+            track_volume,
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(25);
+        buf.extend_from_slice(&Self::DISCRIMINATOR);
+        buf.extend_from_slice(&self.spendable_quote_in.to_le_bytes());
+        buf.extend_from_slice(&self.min_base_amount_out.to_le_bytes());
+        buf.push(self.track_volume as u8);
+        buf
     }
 }
 
@@ -58,6 +108,46 @@ impl SellInstruction {
             base_amount_in,
             min_quote_amount_out,
         }
+    }
+}
+
+/// pump-amm `deposit` instruction args — add liquidity to a pool, minting
+/// `lp_token_amount_out` LP tokens in exchange for up to `max_base_amount_in`
+/// base and `max_quote_amount_in` quote.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct DepositInstruction {
+    pub discriminator: [u8; 8],
+    pub lp_token_amount_out: u64,
+    pub max_base_amount_in: u64,
+    pub max_quote_amount_in: u64,
+}
+
+impl DepositInstruction {
+    pub fn new(
+        lp_token_amount_out: u64,
+        max_base_amount_in: u64,
+        max_quote_amount_in: u64,
+    ) -> Self {
+        Self {
+            discriminator: [242, 35, 198, 137, 82, 225, 242, 182],
+            lp_token_amount_out,
+            max_base_amount_in,
+            max_quote_amount_in,
+        }
+    }
+}
+
+/// pump-amm `claim_cashback` instruction args — takes no arguments; the
+/// `user_volume_accumulator` PDA tells the program how much to pay out.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ClaimCashbackInstruction;
+
+impl ClaimCashbackInstruction {
+    pub const DISCRIMINATOR: [u8; 8] = [37, 58, 35, 126, 190, 53, 228, 197];
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        Self::DISCRIMINATOR.to_vec()
     }
 }
 
@@ -118,8 +208,12 @@ impl WithdrawInstruction {
     }
 }
 
-/// Build a pump-amm Buy instruction for the current canonical IDL plus
-/// cashback / buyback `remaining_accounts`.
+/// Build a pump-amm `buy` instruction (exact-base-out) for the current
+/// canonical IDL plus cashback / buyback `remaining_accounts`.
+///
+/// `track_volume = true` makes the program write this trade's quote-in to
+/// the caller's `user_volume_accumulator` PDA, which is required for any
+/// future `claim_cashback` payout to include it.
 ///
 /// All non-input accounts are derived internally from `pool_info` and `user`:
 /// the protocol-fee-recipient ATA, creator-vault PDAs, volume-accumulator
@@ -133,13 +227,70 @@ impl WithdrawInstruction {
 pub fn make_buy_instruction(
     base_amount_out: u64,
     max_quote_amount_in: u64,
+    track_volume: bool,
     pool_info: &PoolInfo,
     user: &Pubkey,
     user_base_token_account: &Pubkey,
     user_quote_token_account: &Pubkey,
 ) -> Result<Instruction> {
-    let data = BuyInstruction::new(base_amount_out, max_quote_amount_in).to_vec();
+    let data = BuyInstruction::new(base_amount_out, max_quote_amount_in, track_volume).to_vec();
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts: swap_accounts(
+            pool_info,
+            user,
+            user_base_token_account,
+            user_quote_token_account,
+            SwapKind::Buy,
+        ),
+        data,
+    })
+}
 
+/// Build a pump-amm `buy_exact_quote_in` instruction (exact-quote-in) — the
+/// "spend exactly X SOL, get at least Y tokens" entry point most trader
+/// bots want. Account layout is identical to [`make_buy_instruction`];
+/// only the instruction data (discriminator + args) differs.
+pub fn make_buy_exact_quote_in_instruction(
+    spendable_quote_in: u64,
+    min_base_amount_out: u64,
+    track_volume: bool,
+    pool_info: &PoolInfo,
+    user: &Pubkey,
+    user_base_token_account: &Pubkey,
+    user_quote_token_account: &Pubkey,
+) -> Result<Instruction> {
+    let data =
+        BuyExactQuoteInInstruction::new(spendable_quote_in, min_base_amount_out, track_volume)
+            .to_vec();
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts: swap_accounts(
+            pool_info,
+            user,
+            user_base_token_account,
+            user_quote_token_account,
+            SwapKind::Buy,
+        ),
+        data,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum SwapKind {
+    Buy,
+    Sell,
+}
+
+/// Account list shared by `buy` / `buy_exact_quote_in` (23 IDL + 1–4
+/// `remaining_accounts`) and `sell` (21 IDL + 1–3 `remaining_accounts`).
+fn swap_accounts(
+    pool_info: &PoolInfo,
+    user: &Pubkey,
+    user_base_token_account: &Pubkey,
+    user_quote_token_account: &Pubkey,
+    kind: SwapKind,
+) -> Vec<AccountMeta> {
     let protocol_fee_recipient = pick_protocol_fee_recipient();
     let protocol_fee_recipient_ta =
         spl_associated_token_account::get_associated_token_address_with_program_id(
@@ -153,7 +304,6 @@ pub fn make_buy_instruction(
         &pool_info.quote_token_program,
         &pool_info.quote_mint,
     );
-    let user_vol_acc = find_user_vol_accumulator(user);
     let fee_config = fee_config_pda();
 
     let mut accounts = vec![
@@ -176,22 +326,22 @@ pub fn make_buy_instruction(
         AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
         AccountMeta::new(creator_vault_ata, false),
         AccountMeta::new_readonly(creator_vault_authority, false),
-        AccountMeta::new_readonly(GLOBAL_VOLUME_ACCUMULATOR, false),
-        AccountMeta::new(user_vol_acc, false),
-        AccountMeta::new_readonly(fee_config, false),
-        AccountMeta::new_readonly(FEE_PROGRAM, false),
     ];
 
-    append_swap_remaining_accounts(&mut accounts, pool_info, user, /* is_sell */ false);
+    if matches!(kind, SwapKind::Buy) {
+        accounts.push(AccountMeta::new_readonly(GLOBAL_VOLUME_ACCUMULATOR, false));
+        accounts.push(AccountMeta::new(find_user_vol_accumulator(user), false));
+    }
 
-    Ok(Instruction {
-        program_id: PUMP_SWAP_PROGRAM_ID,
-        accounts,
-        data,
-    })
+    accounts.push(AccountMeta::new_readonly(fee_config, false));
+    accounts.push(AccountMeta::new_readonly(FEE_PROGRAM, false));
+
+    let is_sell = matches!(kind, SwapKind::Sell);
+    append_swap_remaining_accounts(&mut accounts, pool_info, user, is_sell);
+    accounts
 }
 
-/// Build a pump-amm Sell instruction for the current canonical IDL plus
+/// Build a pump-amm `sell` instruction for the current canonical IDL plus
 /// cashback / buyback `remaining_accounts`.
 ///
 /// Sell omits the global/user volume accumulators that Buy carries (those
@@ -205,52 +355,109 @@ pub fn make_sell_instruction(
     user_quote_token_account: &Pubkey,
 ) -> Result<Instruction> {
     let data = SellInstruction::new(base_amount_in, min_quote_amount_out).to_vec();
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts: swap_accounts(
+            pool_info,
+            user,
+            user_base_token_account,
+            user_quote_token_account,
+            SwapKind::Sell,
+        ),
+        data,
+    })
+}
 
-    let protocol_fee_recipient = pick_protocol_fee_recipient();
-    let protocol_fee_recipient_ta =
-        spl_associated_token_account::get_associated_token_address_with_program_id(
-            &protocol_fee_recipient,
-            &pool_info.quote_mint,
-            &pool_info.quote_token_program,
-        );
-    let creator_vault_authority = find_coin_creator_vault_authority(&pool_info.coin_creator);
-    let creator_vault_ata = find_coin_creator_vault_ata(
-        &creator_vault_authority,
-        &pool_info.quote_token_program,
-        &pool_info.quote_mint,
-    );
-    let fee_config = fee_config_pda();
+/// Build a pump-amm `deposit` instruction — add liquidity, minting LP tokens.
+///
+/// The user must pre-create their LP-token ATA (`user_pool_token_account`)
+/// for `lp_mint = calc_lp_mint_pda(pool)`. Use
+/// [`PumpSwapClient::deposit_into_wsol_pool`](crate::client::PumpSwapClient::deposit_into_wsol_pool)
+/// for the full convenience flow including ATA creation.
+#[allow(clippy::too_many_arguments)]
+pub fn make_deposit_instruction(
+    lp_token_amount_out: u64,
+    max_base_amount_in: u64,
+    max_quote_amount_in: u64,
+    pool_info: &PoolInfo,
+    user: &Pubkey,
+    user_base_token_account: &Pubkey,
+    user_quote_token_account: &Pubkey,
+    user_pool_token_account: &Pubkey,
+) -> Result<Instruction> {
+    let data =
+        DepositInstruction::new(lp_token_amount_out, max_base_amount_in, max_quote_amount_in)
+            .to_vec();
 
-    let mut accounts = vec![
+    let accounts = vec![
         AccountMeta::new(pool_info.pool, false),
-        AccountMeta::new(*user, true),
         AccountMeta::new_readonly(GLOBAL_CONFIG, false),
+        AccountMeta::new_readonly(*user, true),
         AccountMeta::new_readonly(pool_info.base_mint, false),
         AccountMeta::new_readonly(pool_info.quote_mint, false),
+        AccountMeta::new(pool_info.lp_mint, false),
         AccountMeta::new(*user_base_token_account, false),
         AccountMeta::new(*user_quote_token_account, false),
+        AccountMeta::new(*user_pool_token_account, false),
         AccountMeta::new(pool_info.pool_base_token_account, false),
         AccountMeta::new(pool_info.pool_quote_token_account, false),
-        AccountMeta::new_readonly(protocol_fee_recipient, false),
-        AccountMeta::new(protocol_fee_recipient_ta, false),
-        AccountMeta::new_readonly(pool_info.base_token_program, false),
-        AccountMeta::new_readonly(pool_info.quote_token_program, false),
-        AccountMeta::new_readonly(system_program::ID, false),
-        AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+        AccountMeta::new_readonly(spl_token_2022::ID, false),
         AccountMeta::new_readonly(EVENT_AUTHORITY, false),
         AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
-        AccountMeta::new(creator_vault_ata, false),
-        AccountMeta::new_readonly(creator_vault_authority, false),
-        AccountMeta::new_readonly(fee_config, false),
-        AccountMeta::new_readonly(FEE_PROGRAM, false),
     ];
-
-    append_swap_remaining_accounts(&mut accounts, pool_info, user, /* is_sell */ true);
 
     Ok(Instruction {
         program_id: PUMP_SWAP_PROGRAM_ID,
         accounts,
         data,
+    })
+}
+
+/// Build a pump-amm `claim_cashback` instruction — pays the caller their
+/// accrued cashback from the `user_volume_accumulator` PDA, denominated in
+/// the given `quote_mint` (typically WSOL).
+///
+/// The caller's `user_volume_accumulator` and its quote-mint ATA must
+/// already exist — they're created lazily by the `buy` / `buy_exact_quote_in`
+/// flow when `track_volume = true`.
+pub fn make_claim_cashback_instruction(
+    user: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_token_program: &Pubkey,
+) -> Result<Instruction> {
+    let user_volume_accumulator = find_user_vol_accumulator(user);
+    let user_volume_accumulator_quote_ta =
+        spl_associated_token_account::get_associated_token_address_with_program_id(
+            &user_volume_accumulator,
+            quote_mint,
+            quote_token_program,
+        );
+    let user_quote_ta = spl_associated_token_account::get_associated_token_address_with_program_id(
+        user,
+        quote_mint,
+        quote_token_program,
+    );
+
+    // Per IDL, `user` is mut but NOT marked signer — the program looks the
+    // user up via PDA seeds, so anyone can trigger a cashback claim that
+    // pays out to that user's wsol ATA.
+    let accounts = vec![
+        AccountMeta::new(*user, false),
+        AccountMeta::new(user_volume_accumulator, false),
+        AccountMeta::new_readonly(*quote_mint, false),
+        AccountMeta::new_readonly(*quote_token_program, false),
+        AccountMeta::new(user_volume_accumulator_quote_ta, false),
+        AccountMeta::new(user_quote_ta, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: ClaimCashbackInstruction.to_vec(),
     })
 }
 
@@ -486,10 +693,25 @@ mod tests {
 
         let classic = pool_info(Pubkey::default(), false);
         assert_eq!(
-            make_buy_instruction(1, 2, &classic, &user, &user_base_ata, &user_quote_ata)
+            make_buy_instruction(1, 2, true, &classic, &user, &user_base_ata, &user_quote_ata)
                 .unwrap()
                 .accounts
                 .len(),
+            25
+        );
+        assert_eq!(
+            make_buy_exact_quote_in_instruction(
+                1,
+                2,
+                true,
+                &classic,
+                &user,
+                &user_base_ata,
+                &user_quote_ata,
+            )
+            .unwrap()
+            .accounts
+            .len(),
             25
         );
         assert_eq!(
@@ -502,10 +724,18 @@ mod tests {
 
         let creator_pool = pool_info(pk(10), false);
         assert_eq!(
-            make_buy_instruction(1, 2, &creator_pool, &user, &user_base_ata, &user_quote_ata)
-                .unwrap()
-                .accounts
-                .len(),
+            make_buy_instruction(
+                1,
+                2,
+                true,
+                &creator_pool,
+                &user,
+                &user_base_ata,
+                &user_quote_ata
+            )
+            .unwrap()
+            .accounts
+            .len(),
             26
         );
         assert_eq!(
@@ -521,6 +751,7 @@ mod tests {
             make_buy_instruction(
                 1,
                 2,
+                true,
                 &cashback_creator_pool,
                 &user,
                 &user_base_ata,
@@ -544,6 +775,68 @@ mod tests {
             .accounts
             .len(),
             26
+        );
+    }
+
+    #[test]
+    fn buy_instruction_data_layout_matches_idl() {
+        let bytes = BuyInstruction::new(50_000_000, 564_953_706, true).to_vec();
+        assert_eq!(bytes.len(), 25, "data must be exactly 25 bytes");
+        assert_eq!(&bytes[0..8], &BuyInstruction::DISCRIMINATOR);
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            50_000_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            564_953_706
+        );
+        assert_eq!(bytes[24], 1);
+
+        let bytes_off = BuyInstruction::new(1, 2, false).to_vec();
+        assert_eq!(bytes_off[24], 0);
+    }
+
+    #[test]
+    fn buy_exact_quote_in_data_layout_matches_idl() {
+        // Reproduces the exact on-chain instruction data observed in tx
+        // 5EogpJNF...WoqH (spend 0.05 SOL, min 564_953_706 base out, track on).
+        let bytes = BuyExactQuoteInInstruction::new(50_000_000, 564_953_706, true).to_vec();
+        assert_eq!(bytes.len(), 25);
+        assert_eq!(&bytes[0..8], &BuyExactQuoteInInstruction::DISCRIMINATOR);
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            50_000_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            564_953_706
+        );
+        assert_eq!(bytes[24], 1);
+    }
+
+    #[test]
+    fn deposit_instruction_account_count() {
+        let pool = pool_info(Pubkey::default(), false);
+        let user = pk(7);
+        assert_eq!(
+            make_deposit_instruction(1, 2, 3, &pool, &user, &pk(8), &pk(9), &pk(10))
+                .unwrap()
+                .accounts
+                .len(),
+            15
+        );
+    }
+
+    #[test]
+    fn claim_cashback_instruction_account_count() {
+        let user = pk(7);
+        assert_eq!(
+            make_claim_cashback_instruction(&user, &WRAPPED_SOL_MINT, &spl_token::ID)
+                .unwrap()
+                .accounts
+                .len(),
+            9
         );
     }
 }
