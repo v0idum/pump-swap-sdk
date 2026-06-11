@@ -22,6 +22,8 @@ pub struct Pool {
 #[derive(Debug, Clone, Serialize)]
 pub struct PoolInfo {
     pub pool: Pubkey,
+    /// Raw on-chain pool account data length, including the Anchor discriminator.
+    pub pool_account_data_len: usize,
     pub base_mint: Pubkey,
     pub quote_mint: Pubkey,
     pub lp_mint: Pubkey,
@@ -29,6 +31,7 @@ pub struct PoolInfo {
     pub pool_quote_token_account: Pubkey,
     pub creator: Pubkey,
     pub coin_creator: Pubkey,
+    pub is_mayhem_mode: bool,
     pub is_cashback_coin: bool,
     /// SPL Token program that owns the base mint (`spl_token::ID` or `spl_token_2022::ID`).
     pub base_token_program: Pubkey,

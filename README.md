@@ -27,6 +27,9 @@ the protocol supports.
 - Buy / `buy_exact_quote_in` / sell / deposit / withdraw / claim-cashback
   instruction builders for the current pump-amm account layouts.
 - Pool creation and creator-fee distribution instruction helpers.
+- Current pool flags and account maintenance helpers, including Mayhem-mode
+  fee recipient selection, `extend_account`, user volume accumulators, token
+  incentives, and direct coin-creator fee collection.
 - Reserve-aware buy/sell quote helpers.
 - High-level `PumpSwapClient` for loading pools, simulating swaps,
   building transaction instruction sets, and submitting convenience
@@ -39,7 +42,7 @@ Install from crates.io:
 
 ```toml
 [dependencies]
-pump-swap-sdk = "0.2.0"
+pump-swap-sdk = "0.3.0"
 ```
 
 Requires Rust 1.85+.
@@ -56,7 +59,7 @@ client types and an async runtime:
 
 ```toml
 [dependencies]
-pump-swap-sdk = "0.2.0"
+pump-swap-sdk = "0.3.0"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 solana-client = "2"
@@ -93,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("base_mint:  {}", pool_info.base_mint);
     println!("quote_mint: {}", pool_info.quote_mint);
+    println!("mayhem:     {}", pool_info.is_mayhem_mode);
     println!("base_token_program:  {}", pool_info.base_token_program);
     println!("quote_token_program: {}", pool_info.quote_token_program);
     println!("reserves: base={base_reserve}, quote={quote_reserve}");
@@ -215,6 +219,7 @@ let mut instructions = vec![
 instructions.extend(client.build_buy_ixs(
     base_amount_out,
     amount_in,
+    true, // track_volume
     &pool_info,
     &payer.pubkey(),
     true,
@@ -305,6 +310,14 @@ pump-amm pools, including cashback, creator, fee, and buyback-related accounts.
 Most callers should not add those accounts manually; pass `PoolInfo`, the user,
 and the user's token accounts or use `build_buy_ixs` / `build_sell_ixs`.
 
+### Mayhem mode and old pools
+
+`load_pool` records the pool's `is_mayhem_mode` flag and raw account data
+length. Swap builders use reserved fee recipients for Mayhem pools, and
+`build_buy_ixs`, `build_buy_exact_quote_in_ixs`, `build_sell_ixs`, and
+`deposit_into_wsol_pool` prepend `extend_account` when a loaded pool account is
+smaller than the current pump-amm allocation.
+
 ## API overview
 
 Generate local API docs with:
@@ -324,7 +337,15 @@ cargo doc --open
 - `make_deposit_instruction`, `withdraw_instruction`: LP-side builders.
 - `make_claim_cashback_instruction`: pulls accrued cashback for a user from
   their volume-accumulator PDA.
+- `make_claim_token_incentives_instruction`,
+  `make_init_user_volume_accumulator_instruction`,
+  `make_sync_user_volume_accumulator_instruction`,
+  `make_close_user_volume_accumulator_instruction`,
+  `make_extend_account_instruction`,
+  `make_collect_coin_creator_fee_instruction`: current auxiliary pump-amm
+  instruction builders.
 - `create_pool_instruction`,
+  `create_pool_instruction_with_options`,
   `transfer_creator_fees_to_pump_instruction`,
   `distribute_creator_fees_instruction`: additional pump-amm and pump.fun
   instruction builders.

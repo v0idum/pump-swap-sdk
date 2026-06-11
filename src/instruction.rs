@@ -6,7 +6,7 @@ use crate::state::PoolInfo;
 use crate::util::{
     calc_lp_mint_pda, calc_user_pool_token_account, fee_config_pda, find_coin_creator_vault_ata,
     find_coin_creator_vault_authority, find_user_vol_accumulator, pick_buyback_fee_recipient,
-    pick_protocol_fee_recipient, pool_v2_pda, user_volume_accumulator_quote_ata,
+    pick_protocol_fee_recipient_for_pool, pool_v2_pda, user_volume_accumulator_quote_ata,
 };
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
@@ -159,16 +159,38 @@ pub struct CreatePoolInstruction {
     pub base_amount_in: u64,
     pub quote_amount_in: u64,
     pub coin_creator: Pubkey,
+    pub is_mayhem_mode: u8,
+    pub is_cashback_coin: u8,
 }
 
 impl CreatePoolInstruction {
     pub fn new(base_amount_in: u64, quote_amount_in: u64, coin_creator: Pubkey) -> Self {
-        Self {
-            discriminator: [233, 146, 209, 142, 207, 104, 64, 188],
-            index: 0,
+        Self::new_with_options(
+            0,
             base_amount_in,
             quote_amount_in,
             coin_creator,
+            false,
+            false,
+        )
+    }
+
+    pub fn new_with_options(
+        index: u16,
+        base_amount_in: u64,
+        quote_amount_in: u64,
+        coin_creator: Pubkey,
+        is_mayhem_mode: bool,
+        is_cashback_coin: bool,
+    ) -> Self {
+        Self {
+            discriminator: [233, 146, 209, 142, 207, 104, 64, 188],
+            index,
+            base_amount_in,
+            quote_amount_in,
+            coin_creator,
+            is_mayhem_mode: is_mayhem_mode as u8,
+            is_cashback_coin: is_cashback_coin as u8,
         }
     }
 
@@ -180,6 +202,8 @@ impl CreatePoolInstruction {
         buf.extend_from_slice(&self.base_amount_in.to_le_bytes());
         buf.extend_from_slice(&self.quote_amount_in.to_le_bytes());
         buf.extend_from_slice(&self.coin_creator.to_bytes());
+        buf.push(self.is_mayhem_mode);
+        buf.push(self.is_cashback_coin);
         buf
     }
 }
@@ -291,7 +315,7 @@ fn swap_accounts(
     user_quote_token_account: &Pubkey,
     kind: SwapKind,
 ) -> Vec<AccountMeta> {
-    let protocol_fee_recipient = pick_protocol_fee_recipient();
+    let protocol_fee_recipient = pick_protocol_fee_recipient_for_pool(pool_info.is_mayhem_mode);
     let protocol_fee_recipient_ta =
         spl_associated_token_account::get_associated_token_address_with_program_id(
             &protocol_fee_recipient,
@@ -461,6 +485,148 @@ pub fn make_claim_cashback_instruction(
     })
 }
 
+/// Build a pump-amm `extend_account` instruction. The official SDK prepends
+/// this before swap / liquidity instructions when an older pool account is
+/// smaller than the current 300-byte pool allocation.
+pub fn make_extend_account_instruction(account: &Pubkey, user: &Pubkey) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new(*account, false),
+        AccountMeta::new_readonly(*user, true),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![234, 102, 194, 203, 150, 72, 62, 229],
+    })
+}
+
+/// Build a pump-amm `init_user_volume_accumulator` instruction for a user.
+pub fn make_init_user_volume_accumulator_instruction(
+    payer: &Pubkey,
+    user: &Pubkey,
+) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(*user, false),
+        AccountMeta::new(find_user_vol_accumulator(user), false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![94, 6, 202, 115, 255, 96, 232, 183],
+    })
+}
+
+/// Build a pump-amm `sync_user_volume_accumulator` instruction. This moves a
+/// user's current-day volume into claimable incentive state when the global
+/// incentive day advances.
+pub fn make_sync_user_volume_accumulator_instruction(user: &Pubkey) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new_readonly(*user, false),
+        AccountMeta::new_readonly(GLOBAL_VOLUME_ACCUMULATOR, false),
+        AccountMeta::new(find_user_vol_accumulator(user), false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![86, 31, 192, 87, 163, 87, 79, 238],
+    })
+}
+
+/// Build a pump-amm `close_user_volume_accumulator` instruction.
+pub fn make_close_user_volume_accumulator_instruction(user: &Pubkey) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new(*user, true),
+        AccountMeta::new(find_user_vol_accumulator(user), false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![249, 69, 164, 218, 150, 103, 84, 138],
+    })
+}
+
+/// Build a pump-amm `claim_token_incentives` instruction.
+///
+/// `user_token_account` is the user's ATA for `mint`; `global_incentive_token_account`
+/// is the ATA for `(GLOBAL_VOLUME_ACCUMULATOR, mint, token_program)`.
+pub fn make_claim_token_incentives_instruction(
+    user: &Pubkey,
+    payer: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    user_token_account: &Pubkey,
+    global_incentive_token_account: &Pubkey,
+) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new_readonly(*user, false),
+        AccountMeta::new(*user_token_account, false),
+        AccountMeta::new_readonly(GLOBAL_VOLUME_ACCUMULATOR, false),
+        AccountMeta::new(*global_incentive_token_account, false),
+        AccountMeta::new(find_user_vol_accumulator(user), false),
+        AccountMeta::new_readonly(*mint, false),
+        AccountMeta::new_readonly(*token_program, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+        AccountMeta::new(*payer, true),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![16, 4, 71, 28, 204, 1, 40, 27],
+    })
+}
+
+/// Build a pump-amm `collect_coin_creator_fee` instruction. This is the
+/// current direct collect path from the coin-creator vault ATA into the coin
+/// creator's quote token account.
+pub fn make_collect_coin_creator_fee_instruction(
+    coin_creator: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_token_program: &Pubkey,
+    coin_creator_token_account: &Pubkey,
+) -> Result<Instruction> {
+    let coin_creator_vault_authority = find_coin_creator_vault_authority(coin_creator);
+    let coin_creator_vault_ata = find_coin_creator_vault_ata(
+        &coin_creator_vault_authority,
+        quote_token_program,
+        quote_mint,
+    );
+    let accounts = vec![
+        AccountMeta::new_readonly(*quote_mint, false),
+        AccountMeta::new_readonly(*quote_token_program, false),
+        AccountMeta::new_readonly(*coin_creator, false),
+        AccountMeta::new_readonly(coin_creator_vault_authority, false),
+        AccountMeta::new(coin_creator_vault_ata, false),
+        AccountMeta::new(*coin_creator_token_account, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![160, 57, 89, 42, 181, 139, 43, 66],
+    })
+}
+
 /// Append the live program's `remaining_accounts` for Buy / Sell. Mirrors
 /// the pump-fun npm SDK `offlinePumpAmm` logic.
 ///
@@ -521,7 +687,56 @@ pub fn create_pool_instruction(
     pool_base_token_account: &Pubkey,
     pool_quote_token_account: &Pubkey,
 ) -> Result<Instruction> {
-    let data = CreatePoolInstruction::new(base_amount_in, quote_amount_in, *coin_creator).to_vec();
+    create_pool_instruction_with_options(
+        0,
+        base_amount_in,
+        quote_amount_in,
+        false,
+        false,
+        pool,
+        creator,
+        coin_creator,
+        base_mint,
+        quote_mint,
+        user_base_token_account,
+        user_quote_token_account,
+        pool_base_token_account,
+        pool_quote_token_account,
+        &spl_token::ID,
+        &spl_token::ID,
+    )
+}
+
+/// Build a pump-amm `create_pool` instruction with the current IDL args:
+/// `index`, `coin_creator`, `is_mayhem_mode`, and `is_cashback_coin`.
+#[allow(clippy::too_many_arguments)]
+pub fn create_pool_instruction_with_options(
+    index: u16,
+    base_amount_in: u64,
+    quote_amount_in: u64,
+    is_mayhem_mode: bool,
+    is_cashback_coin: bool,
+    pool: &Pubkey,
+    creator: &Pubkey,
+    coin_creator: &Pubkey,
+    base_mint: &Pubkey,
+    quote_mint: &Pubkey,
+    user_base_token_account: &Pubkey,
+    user_quote_token_account: &Pubkey,
+    pool_base_token_account: &Pubkey,
+    pool_quote_token_account: &Pubkey,
+    base_token_program: &Pubkey,
+    quote_token_program: &Pubkey,
+) -> Result<Instruction> {
+    let data = CreatePoolInstruction::new_with_options(
+        index,
+        base_amount_in,
+        quote_amount_in,
+        *coin_creator,
+        is_mayhem_mode,
+        is_cashback_coin,
+    )
+    .to_vec();
 
     let lp_mint = calc_lp_mint_pda(pool).0;
 
@@ -539,8 +754,8 @@ pub fn create_pool_instruction(
         AccountMeta::new(*pool_quote_token_account, false),
         AccountMeta::new_readonly(system_program::ID, false),
         AccountMeta::new_readonly(spl_token_2022::ID, false),
-        AccountMeta::new_readonly(spl_token::ID, false),
-        AccountMeta::new_readonly(spl_token::ID, false),
+        AccountMeta::new_readonly(*base_token_program, false),
+        AccountMeta::new_readonly(*quote_token_program, false),
         AccountMeta::new_readonly(spl_associated_token_account::ID, false),
         AccountMeta::new_readonly(EVENT_AUTHORITY, false),
         AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
@@ -672,6 +887,7 @@ mod tests {
     fn pool_info(coin_creator: Pubkey, is_cashback_coin: bool) -> PoolInfo {
         PoolInfo {
             pool: pk(1),
+            pool_account_data_len: crate::constants::POOL_ACCOUNT_NEW_SIZE,
             base_mint: pk(2),
             quote_mint: WRAPPED_SOL_MINT,
             lp_mint: pk(3),
@@ -679,6 +895,7 @@ mod tests {
             pool_quote_token_account: pk(5),
             creator: pk(6),
             coin_creator,
+            is_mayhem_mode: false,
             is_cashback_coin,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
@@ -837,6 +1054,80 @@ mod tests {
                 .accounts
                 .len(),
             9
+        );
+    }
+
+    #[test]
+    fn create_pool_instruction_data_layout_includes_current_flags() {
+        let ix = CreatePoolInstruction::new_with_options(7, 1, 2, pk(3), true, false).to_vec();
+
+        assert_eq!(ix.len(), 60);
+        assert_eq!(&ix[0..8], &[233, 146, 209, 142, 207, 104, 64, 188]);
+        assert_eq!(u16::from_le_bytes(ix[8..10].try_into().unwrap()), 7);
+        assert_eq!(u64::from_le_bytes(ix[10..18].try_into().unwrap()), 1);
+        assert_eq!(u64::from_le_bytes(ix[18..26].try_into().unwrap()), 2);
+        assert_eq!(&ix[26..58], pk(3).as_ref());
+        assert_eq!(ix[58], 1);
+        assert_eq!(ix[59], 0);
+    }
+
+    #[test]
+    fn current_auxiliary_instruction_builders_match_idl_account_counts() {
+        let user = pk(7);
+        let payer = pk(8);
+        let mint = WRAPPED_SOL_MINT;
+        let token_program = spl_token::ID;
+        let user_ata = spl_associated_token_account::get_associated_token_address(&user, &mint);
+        let global_ata = spl_associated_token_account::get_associated_token_address(
+            &GLOBAL_VOLUME_ACCUMULATOR,
+            &mint,
+        );
+
+        let extend_ix = make_extend_account_instruction(&pk(1), &user).unwrap();
+        assert_eq!(extend_ix.data, vec![234, 102, 194, 203, 150, 72, 62, 229]);
+        assert_eq!(extend_ix.accounts.len(), 5);
+
+        assert_eq!(
+            make_init_user_volume_accumulator_instruction(&payer, &user)
+                .unwrap()
+                .accounts
+                .len(),
+            6
+        );
+        assert_eq!(
+            make_sync_user_volume_accumulator_instruction(&user)
+                .unwrap()
+                .accounts
+                .len(),
+            5
+        );
+        assert_eq!(
+            make_close_user_volume_accumulator_instruction(&user)
+                .unwrap()
+                .accounts
+                .len(),
+            4
+        );
+        assert_eq!(
+            make_claim_token_incentives_instruction(
+                &user,
+                &payer,
+                &mint,
+                &token_program,
+                &user_ata,
+                &global_ata,
+            )
+            .unwrap()
+            .accounts
+            .len(),
+            12
+        );
+        assert_eq!(
+            make_collect_coin_creator_fee_instruction(&user, &mint, &token_program, &user_ata,)
+                .unwrap()
+                .accounts
+                .len(),
+            8
         );
     }
 }

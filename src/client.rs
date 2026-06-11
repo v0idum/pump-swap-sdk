@@ -1,14 +1,19 @@
-use crate::constants::{PUMP_SWAP_PROGRAM_ID, WRAPPED_SOL_MINT};
+use crate::constants::{
+    GLOBAL_VOLUME_ACCUMULATOR, POOL_ACCOUNT_NEW_SIZE, PUMP_SWAP_PROGRAM_ID, WRAPPED_SOL_MINT,
+};
 use crate::instruction::{
-    create_pool_instruction, distribute_creator_fees_instruction,
+    create_pool_instruction_with_options, distribute_creator_fees_instruction,
     make_buy_exact_quote_in_instruction, make_buy_instruction, make_claim_cashback_instruction,
-    make_deposit_instruction, make_sell_instruction, transfer_creator_fees_to_pump_instruction,
-    withdraw_instruction,
+    make_claim_token_incentives_instruction, make_close_user_volume_accumulator_instruction,
+    make_collect_coin_creator_fee_instruction, make_deposit_instruction,
+    make_extend_account_instruction, make_init_user_volume_accumulator_instruction,
+    make_sell_instruction, make_sync_user_volume_accumulator_instruction,
+    transfer_creator_fees_to_pump_instruction, withdraw_instruction,
 };
 use crate::math::calc_amount_out;
 use crate::state::PoolInfo;
 use crate::util::{
-    calc_lp_mint_pda, calc_pool_pda, calc_user_pool_token_account,
+    calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
     create_ata_token_or_not_with_program, gen_pubkey_with_seed, load_pool,
 };
 use anyhow::{Result, anyhow};
@@ -170,16 +175,51 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         base_mint: &Pubkey,
         payer: &Keypair,
     ) -> Result<()> {
+        self.create_wsol_pool_with_options(
+            0,
+            base_amount_in,
+            quote_amount_in,
+            coin_creator,
+            base_mint,
+            &spl_token::ID,
+            false,
+            false,
+            payer,
+        )
+        .await
+    }
+
+    /// Create a new WSOL-quoted pool with the current create-pool options.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_wsol_pool_with_options(
+        &self,
+        index: u16,
+        base_amount_in: u64,
+        quote_amount_in: u64,
+        coin_creator: &Pubkey,
+        base_mint: &Pubkey,
+        base_token_program: &Pubkey,
+        is_mayhem_mode: bool,
+        is_cashback_coin: bool,
+        payer: &Keypair,
+    ) -> Result<()> {
         let wallet = payer.pubkey();
-        let pool = calc_pool_pda(&wallet, base_mint, &WRAPPED_SOL_MINT).0;
+        let pool = calc_pool_pda_with_index(index, &wallet, base_mint, &WRAPPED_SOL_MINT).0;
         info!("Creating pool: {}", pool);
 
-        let base_ata =
-            spl_associated_token_account::get_associated_token_address(&wallet, base_mint);
+        let base_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+            &wallet,
+            base_mint,
+            base_token_program,
+        );
         let wsol_ata =
             spl_associated_token_account::get_associated_token_address(&wallet, &WRAPPED_SOL_MINT);
         let pool_base_ata =
-            spl_associated_token_account::get_associated_token_address(&pool, base_mint);
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                &pool,
+                base_mint,
+                base_token_program,
+            );
         let pool_quote_ata =
             spl_associated_token_account::get_associated_token_address(&pool, &WRAPPED_SOL_MINT);
 
@@ -189,17 +229,24 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             &WRAPPED_SOL_MINT,
             &spl_token::ID,
         );
-        let pool_base_ata_ix =
-            create_associated_token_account_idempotent(&wallet, &pool, base_mint, &spl_token::ID);
+        let pool_base_ata_ix = create_associated_token_account_idempotent(
+            &wallet,
+            &pool,
+            base_mint,
+            base_token_program,
+        );
         let pool_quote_ata_ix = create_associated_token_account_idempotent(
             &wallet,
             &pool,
             &WRAPPED_SOL_MINT,
             &spl_token::ID,
         );
-        let create_ix = create_pool_instruction(
+        let create_ix = create_pool_instruction_with_options(
+            index,
             base_amount_in,
             quote_amount_in,
+            is_mayhem_mode,
+            is_cashback_coin,
             &pool,
             &wallet,
             coin_creator,
@@ -209,6 +256,8 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             &wsol_ata,
             &pool_base_ata,
             &pool_quote_ata,
+            base_token_program,
+            &spl_token::ID,
         )?;
 
         let instructions = vec![
@@ -404,6 +453,110 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         Ok(())
     }
 
+    /// Build a `claim_token_incentives` instruction set for `user`.
+    ///
+    /// The user's incentive-token ATA is created idempotently when
+    /// `create_user_ata` is true. The global incentive token account is owned
+    /// by `GLOBAL_VOLUME_ACCUMULATOR` and must already be funded by the
+    /// protocol.
+    pub fn build_claim_token_incentives_ixs(
+        &self,
+        user: &Pubkey,
+        payer: &Pubkey,
+        mint: &Pubkey,
+        token_program: &Pubkey,
+        create_user_ata: bool,
+    ) -> Result<Vec<Instruction>> {
+        let mut instructions = Vec::new();
+        let user_token_account =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                user,
+                mint,
+                token_program,
+            );
+        if create_user_ata {
+            instructions.push(create_associated_token_account_idempotent(
+                payer,
+                user,
+                mint,
+                token_program,
+            ));
+        }
+        let global_incentive_token_account =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                &GLOBAL_VOLUME_ACCUMULATOR,
+                mint,
+                token_program,
+            );
+        instructions.push(make_claim_token_incentives_instruction(
+            user,
+            payer,
+            mint,
+            token_program,
+            &user_token_account,
+            &global_incentive_token_account,
+        )?);
+        Ok(instructions)
+    }
+
+    /// Build a `collect_coin_creator_fee` instruction set. Creates the coin
+    /// creator's quote-token ATA idempotently when requested.
+    pub fn build_collect_coin_creator_fee_ixs(
+        &self,
+        coin_creator: &Pubkey,
+        payer: &Pubkey,
+        quote_mint: &Pubkey,
+        quote_token_program: &Pubkey,
+        create_coin_creator_ata: bool,
+    ) -> Result<Vec<Instruction>> {
+        let mut instructions = Vec::new();
+        let coin_creator_token_account =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                coin_creator,
+                quote_mint,
+                quote_token_program,
+            );
+        if create_coin_creator_ata {
+            instructions.push(create_associated_token_account_idempotent(
+                payer,
+                coin_creator,
+                quote_mint,
+                quote_token_program,
+            ));
+        }
+        instructions.push(make_collect_coin_creator_fee_instruction(
+            coin_creator,
+            quote_mint,
+            quote_token_program,
+            &coin_creator_token_account,
+        )?);
+        Ok(instructions)
+    }
+
+    /// Build an `extend_account` instruction for older pool accounts.
+    pub fn build_extend_account_ix(&self, account: &Pubkey, user: &Pubkey) -> Result<Instruction> {
+        make_extend_account_instruction(account, user)
+    }
+
+    /// Build an `init_user_volume_accumulator` instruction.
+    pub fn build_init_user_volume_accumulator_ix(
+        &self,
+        payer: &Pubkey,
+        user: &Pubkey,
+    ) -> Result<Instruction> {
+        make_init_user_volume_accumulator_instruction(payer, user)
+    }
+
+    /// Build a `sync_user_volume_accumulator` instruction.
+    pub fn build_sync_user_volume_accumulator_ix(&self, user: &Pubkey) -> Result<Instruction> {
+        make_sync_user_volume_accumulator_instruction(user)
+    }
+
+    /// Build a `close_user_volume_accumulator` instruction.
+    pub fn build_close_user_volume_accumulator_ix(&self, user: &Pubkey) -> Result<Instruction> {
+        make_close_user_volume_accumulator_instruction(user)
+    }
+
     /// Deposit liquidity into a pool, minting `lp_token_amount_out` LP
     /// tokens. The caller's base, quote, and pool-LP ATAs are created
     /// idempotently before the deposit instruction.
@@ -459,7 +612,11 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             &user_lp_ata,
         )?;
 
-        let instructions = vec![
+        let mut instructions = Vec::new();
+        if let Some(ix) = Self::maybe_extend_pool_ix(pool_info, &wallet)? {
+            instructions.push(ix);
+        }
+        instructions.extend(vec![
             base_ata_ix,
             wsol_ata_ix,
             system_instruction::transfer(&wallet, &wsol_ata, max_quote_amount_in),
@@ -467,7 +624,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             lp_ata_ix,
             deposit_ix,
             spl_token_close_account(&spl_token::ID, &wsol_ata, &wallet, &wallet, &[])?,
-        ];
+        ]);
 
         let mut tx = Transaction::new_with_payer(&instructions, Some(&wallet));
         tx.sign(&[payer], self.rpc.get_latest_blockhash().await?);
@@ -559,6 +716,17 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         ])
     }
 
+    fn maybe_extend_pool_ix(pool_info: &PoolInfo, payer: &Pubkey) -> Result<Option<Instruction>> {
+        if pool_info.pool_account_data_len < POOL_ACCOUNT_NEW_SIZE {
+            Ok(Some(make_extend_account_instruction(
+                &pool_info.pool,
+                payer,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Build the instruction sequence for a buy (exact-base-out): a fresh
     /// seed-derived WSOL account, optional ATA creation for the base mint,
     /// the buy ix, and a close of the WSOL account back to lamports.
@@ -576,6 +744,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         create_ata: bool,
     ) -> Result<Vec<Instruction>> {
         let mut instructions: Vec<Instruction> = Vec::new();
+        if let Some(ix) = Self::maybe_extend_pool_ix(pool_info, payer)? {
+            instructions.push(ix);
+        }
         let (wsol_acc, seed) = gen_pubkey_with_seed(payer)?;
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);
@@ -651,6 +822,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         create_ata: bool,
     ) -> Result<Vec<Instruction>> {
         let mut instructions: Vec<Instruction> = Vec::new();
+        if let Some(ix) = Self::maybe_extend_pool_ix(pool_info, payer)? {
+            instructions.push(ix);
+        }
         let (wsol_acc, seed) = gen_pubkey_with_seed(payer)?;
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);
@@ -723,6 +897,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         close_spl_acc: bool,
     ) -> Result<Vec<Instruction>> {
         let mut instructions: Vec<Instruction> = Vec::new();
+        if let Some(ix) = Self::maybe_extend_pool_ix(pool_info, payer)? {
+            instructions.push(ix);
+        }
         let (wsol_acc, seed) = gen_pubkey_with_seed(payer)?;
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);

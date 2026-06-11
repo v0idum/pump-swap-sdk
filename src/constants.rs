@@ -25,6 +25,10 @@ pub const EVENT_AUTHORITY: Pubkey = pubkey!("GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ6
 /// pump-amm GlobalConfig account.
 pub const GLOBAL_CONFIG: Pubkey = pubkey!("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw");
 
+/// Current pool-account allocation size used by the official SDK before it
+/// prepends `extend_account` for older pools.
+pub const POOL_ACCOUNT_NEW_SIZE: usize = 300;
+
 /// Global volume accumulator account (PDA `["global_volume_accumulator"]` under
 /// pump-amm; address is stable, pinned as a constant for convenience).
 pub const GLOBAL_VOLUME_ACCUMULATOR: Pubkey =
@@ -44,6 +48,22 @@ pub const PROTOCOL_FEE_RECIPIENTS: [Pubkey; 8] = [
     pubkey!("FWsW1xNtWscwNmKv6wVsU1iTzRN6wmmk3MjxRP5tT7hz"),
     pubkey!("G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP"),
     pubkey!("JCRGumoE9Qi5BBgULTgdgTLjSgkCMSbF62ZZfGs84JeU"),
+];
+
+/// pump-amm GlobalConfig reserved fee recipients used for Mayhem-mode pools.
+///
+/// The live config stores one `reserved_fee_recipient` plus seven
+/// `reserved_fee_recipients`; the program accepts any of these when the pool
+/// is in Mayhem mode.
+pub const RESERVED_FEE_RECIPIENTS: [Pubkey; 8] = [
+    pubkey!("GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS"),
+    pubkey!("4budycTjhs9fD6xw62VBducVTNgMgJJ5BgtKq7mAZwn6"),
+    pubkey!("8SBKzEQU4nLSzcwF4a74F2iaUDQyTfjGndn6qUWBnrpR"),
+    pubkey!("4UQeTP1T39KZ9Sfxzo3WR5skgsaP6NZa87BAkuazLEKH"),
+    pubkey!("8sNeir4QsLsJdYpc9RZacohhK1Y5FLU3nC5LXgYB4aa6"),
+    pubkey!("Fh9HmeLNUMVCvejxCtCL2DbYaRyBFVJ5xrWkLnMH6fdk"),
+    pubkey!("463MEnMeGyJekNZFQSTUABBEbLnvMTALbT6ZmsxAbAdq"),
+    pubkey!("6AUH3WEHucYZyC61hqpqYUWVto5qA5hjHuNQ32GNnNxA"),
 ];
 
 /// pump-amm GlobalConfig.buyback_fee_recipients (size 8). PDAs owned by the

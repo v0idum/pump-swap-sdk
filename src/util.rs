@@ -1,5 +1,6 @@
 use crate::constants::{
     BUYBACK_FEE_RECIPIENTS, FEE_PROGRAM, PROTOCOL_FEE_RECIPIENTS, PUMP_SWAP_PROGRAM_ID,
+    RESERVED_FEE_RECIPIENTS,
 };
 use crate::state::{Pool, PoolInfo};
 use anyhow::{Result, anyhow};
@@ -136,6 +137,7 @@ pub async fn load_pool_with_token_program(
 
     Ok(PoolInfo {
         pool: *pool_pubkey,
+        pool_account_data_len: data.len(),
         base_mint: pool_data.base_mint,
         quote_mint: pool_data.quote_mint,
         lp_mint: pool_data.lp_mint,
@@ -143,6 +145,7 @@ pub async fn load_pool_with_token_program(
         pool_quote_token_account: pool_data.pool_quote_token_account,
         creator: pool_data.creator,
         coin_creator: pool_data.coin_creator,
+        is_mayhem_mode: pool_data.is_mayhem_mode != 0,
         is_cashback_coin: pool_data.is_cashback_coin != 0,
         base_token_program,
         quote_token_program,
@@ -218,10 +221,20 @@ pub fn gen_pubkey_with_seed(from_public_key: &Pubkey) -> Result<(Pubkey, String)
 
 /// PDA: `["pool", index_le_bytes, creator, base_mint, quote_mint]` under pump-amm.
 pub fn calc_pool_pda(creator: &Pubkey, base_mint: &Pubkey, quote_mint: &Pubkey) -> (Pubkey, u8) {
+    calc_pool_pda_with_index(0, creator, base_mint, quote_mint)
+}
+
+/// PDA: `["pool", index_le_bytes, creator, base_mint, quote_mint]` under pump-amm.
+pub fn calc_pool_pda_with_index(
+    index: u16,
+    creator: &Pubkey,
+    base_mint: &Pubkey,
+    quote_mint: &Pubkey,
+) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[
             b"pool",
-            &[0u8, 0u8],
+            &index.to_le_bytes(),
             creator.as_ref(),
             base_mint.as_ref(),
             quote_mint.as_ref(),
@@ -378,6 +391,22 @@ pub fn pick_protocol_fee_recipient() -> Pubkey {
         .expect("PROTOCOL_FEE_RECIPIENTS is non-empty")
 }
 
+/// Pick a random reserved fee recipient from the GlobalConfig Mayhem list.
+pub fn pick_reserved_fee_recipient() -> Pubkey {
+    *RESERVED_FEE_RECIPIENTS
+        .choose(&mut rand::rng())
+        .expect("RESERVED_FEE_RECIPIENTS is non-empty")
+}
+
+/// Pick the protocol fee recipient accepted by the pool's mode.
+pub fn pick_protocol_fee_recipient_for_pool(is_mayhem_mode: bool) -> Pubkey {
+    if is_mayhem_mode {
+        pick_reserved_fee_recipient()
+    } else {
+        pick_protocol_fee_recipient()
+    }
+}
+
 /// Pick a random `buyback_fee_recipient` from the GlobalConfig list. Required
 /// as a remaining account on every Buy and Sell.
 pub fn pick_buyback_fee_recipient() -> Pubkey {
@@ -393,5 +422,21 @@ mod tests {
     #[test]
     fn jito_pool_rejects_empty_endpoint_list() {
         assert!(JitoPool::new(&[], None, Duration::from_millis(0)).is_err());
+    }
+
+    #[test]
+    fn indexed_pool_pda_keeps_zero_index_backward_compatible() {
+        let creator = Pubkey::new_from_array([1; 32]);
+        let base = Pubkey::new_from_array([2; 32]);
+        let quote = Pubkey::new_from_array([3; 32]);
+
+        assert_eq!(
+            calc_pool_pda(&creator, &base, &quote),
+            calc_pool_pda_with_index(0, &creator, &base, &quote)
+        );
+        assert_ne!(
+            calc_pool_pda(&creator, &base, &quote).0,
+            calc_pool_pda_with_index(1, &creator, &base, &quote).0
+        );
     }
 }

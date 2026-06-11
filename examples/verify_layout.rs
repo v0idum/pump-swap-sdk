@@ -17,12 +17,19 @@ use anyhow::{Context, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::instruction::Instruction;
 use solana_sdk::message::Message;
 use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 
-use pump_swap_sdk::{PumpSwapClient, calc_amount_out};
+use pump_swap_sdk::{PUMP_SWAP_PROGRAM_ID, PumpSwapClient, calc_amount_out};
+
+fn find_pump_amm_ix<'a>(ixs: &'a [Instruction], discriminator: &[u8]) -> Result<&'a Instruction> {
+    ixs.iter()
+        .find(|ix| ix.program_id == PUMP_SWAP_PROGRAM_ID && ix.data.starts_with(discriminator))
+        .context("pump-amm instruction not found")
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,9 +48,10 @@ async fn main() -> Result<()> {
     let client = PumpSwapClient::new(Arc::clone(&rpc));
     let pool_info = client.load_pool(&pool_pubkey).await?;
     println!(
-        "pool ok: base_mint={} quote_mint={} cashback={} base_prog={} quote_prog={}",
+        "pool ok: base_mint={} quote_mint={} mayhem={} cashback={} base_prog={} quote_prog={}",
         pool_info.base_mint,
         pool_info.quote_mint,
+        pool_info.is_mayhem_mode,
         pool_info.is_cashback_coin,
         pool_info.base_token_program,
         pool_info.quote_token_program,
@@ -63,10 +71,8 @@ async fn main() -> Result<()> {
         &user_pubkey,
         true,
     )?;
-    println!(
-        "\nBUY: {} accounts in pump-amm ix",
-        buy_ixs[buy_ixs.len() - 2].accounts.len()
-    );
+    let buy_ix = find_pump_amm_ix(&buy_ixs, &[102, 6, 61, 18, 1, 218, 235, 234])?;
+    println!("\nBUY: {} accounts in pump-amm ix", buy_ix.accounts.len());
 
     let msg = Message::new(&buy_ixs, Some(&user_pubkey));
     let mut tx = Transaction::new_unsigned(msg);
@@ -103,9 +109,10 @@ async fn main() -> Result<()> {
     let spend = sol_to_lamports(0.001);
     let bxqi_ixs =
         client.build_buy_exact_quote_in_ixs(spend, 1, true, &pool_info, &user_pubkey, true)?;
+    let bxqi_ix = find_pump_amm_ix(&bxqi_ixs, &[198, 46, 21, 82, 180, 217, 232, 112])?;
     println!(
         "\nBUY_EXACT_QUOTE_IN: {} accounts in pump-amm ix",
-        bxqi_ixs[bxqi_ixs.len() - 2].accounts.len()
+        bxqi_ix.accounts.len()
     );
     let msg = Message::new(&bxqi_ixs, Some(&user_pubkey));
     let mut tx = Transaction::new_unsigned(msg);
@@ -134,10 +141,8 @@ async fn main() -> Result<()> {
     // Sell: 1k base units, 0 minimum quote out — pure layout check.
     let amount_in_base: u64 = 1_000;
     let sell_ixs = client.build_sell_ixs(amount_in_base, 0, &pool_info, &user_pubkey, false)?;
-    println!(
-        "\nSELL: {} accounts in pump-amm ix",
-        sell_ixs[sell_ixs.len() - 2].accounts.len()
-    );
+    let sell_ix = find_pump_amm_ix(&sell_ixs, &[51, 230, 133, 164, 1, 127, 131, 173])?;
+    println!("\nSELL: {} accounts in pump-amm ix", sell_ix.accounts.len());
 
     let msg = Message::new(&sell_ixs, Some(&user_pubkey));
     let mut tx = Transaction::new_unsigned(msg);
