@@ -1228,10 +1228,8 @@ mod orientation_tests {
         // account[5] = user_base_token_account must be the WSOL seeded account
         assert_eq!(ix.accounts[5].pubkey, wsol_seeded_account(&ixs));
         // account[6] = user_quote_token_account must be the token ATA
-        let token_ata = spl_associated_token_account::get_associated_token_address(
-            &payer,
-            &info.token_mint(),
-        );
+        let token_ata =
+            spl_associated_token_account::get_associated_token_address(&payer, &info.token_mint());
         assert_eq!(ix.accounts[6].pubkey, token_ata);
     }
 
@@ -1245,10 +1243,8 @@ mod orientation_tests {
             .unwrap();
         let ix = pump_amm_ix(&ixs);
         assert_eq!(ix.data[..8], BuyExactQuoteInInstruction::DISCRIMINATOR);
-        let token_ata = spl_associated_token_account::get_associated_token_address(
-            &payer,
-            &info.token_mint(),
-        );
+        let token_ata =
+            spl_associated_token_account::get_associated_token_address(&payer, &info.token_mint());
         assert_eq!(ix.accounts[5].pubkey, token_ata);
         assert_eq!(ix.accounts[6].pubkey, wsol_seeded_account(&ixs));
     }
@@ -1264,10 +1260,8 @@ mod orientation_tests {
         let ix = pump_amm_ix(&ixs);
         assert_eq!(ix.data[..8], BuyExactQuoteInInstruction::DISCRIMINATOR);
         assert_eq!(ix.accounts[5].pubkey, wsol_seeded_account(&ixs));
-        let token_ata = spl_associated_token_account::get_associated_token_address(
-            &payer,
-            &info.token_mint(),
-        );
+        let token_ata =
+            spl_associated_token_account::get_associated_token_address(&payer, &info.token_mint());
         assert_eq!(ix.accounts[6].pubkey, token_ata);
     }
 
@@ -1281,10 +1275,8 @@ mod orientation_tests {
             .unwrap();
         let ix = pump_amm_ix(&ixs);
         assert_eq!(ix.data[..8], [51, 230, 133, 164, 1, 127, 131, 173]);
-        let token_ata = spl_associated_token_account::get_associated_token_address(
-            &payer,
-            &info.token_mint(),
-        );
+        let token_ata =
+            spl_associated_token_account::get_associated_token_address(&payer, &info.token_mint());
         assert_eq!(ix.accounts[5].pubkey, token_ata);
         assert_eq!(ix.accounts[6].pubkey, wsol_seeded_account(&ixs));
     }
@@ -1294,10 +1286,8 @@ mod orientation_tests {
         let client = test_client();
         let info = pool_info(true);
         let payer = Pubkey::new_unique();
-        let token_ata = spl_associated_token_account::get_associated_token_address(
-            &payer,
-            &info.token_mint(),
-        );
+        let token_ata =
+            spl_associated_token_account::get_associated_token_address(&payer, &info.token_mint());
 
         let buy = client
             .build_buy_ixs(1_000, 1_000_000, true, &info, &payer, true)

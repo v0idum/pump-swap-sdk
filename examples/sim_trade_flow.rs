@@ -64,7 +64,13 @@ async fn main() -> Result<()> {
     // already validated) — anything account-related earlier means layout bug.
     let sell_ixs =
         client.build_token_sell_ixs(tokens_to_sell, 1, &pool_info, &user_pubkey, false)?;
-    simulate("TOKEN SELL (expect insufficient-funds, NOT account errors)", &rpc, sell_ixs, &user_pubkey).await?;
+    simulate(
+        "TOKEN SELL (expect insufficient-funds, NOT account errors)",
+        &rpc,
+        sell_ixs,
+        &user_pubkey,
+    )
+    .await?;
     Ok(())
 }
 
