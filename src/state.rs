@@ -19,6 +19,20 @@ pub struct Pool {
     pub is_cashback_coin: u8,
 }
 
+/// Which side of the pair is the traded token (the non-SOL asset).
+///
+/// pump.fun graduations currently deploy pools with **SOL as base** (~85% of
+/// live volume); direct launches are typically token-base. The pump-amm
+/// `buy`/`sell` instructions are defined over base/quote, so trader intent
+/// ("buy the token") maps to a different instruction per orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSide {
+    /// base = token, quote = WSOL (canonical / direct-launch style).
+    Base,
+    /// base = WSOL, quote = token (current pump.fun-graduation style).
+    Quote,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PoolInfo {
     pub pool: Pubkey,
@@ -37,4 +51,46 @@ pub struct PoolInfo {
     pub base_token_program: Pubkey,
     /// SPL Token program that owns the quote mint (`spl_token::ID` or `spl_token_2022::ID`).
     pub quote_token_program: Pubkey,
+}
+
+impl PoolInfo {
+    /// True when the pool stores WSOL on the base side (pump.fun-graduation
+    /// orientation). See [`TokenSide`].
+    pub fn sol_is_base(&self) -> bool {
+        self.base_mint == crate::constants::WRAPPED_SOL_MINT
+    }
+
+    /// Which side of the pair holds the traded (non-SOL) token.
+    pub fn token_side(&self) -> TokenSide {
+        if self.sol_is_base() {
+            TokenSide::Quote
+        } else {
+            TokenSide::Base
+        }
+    }
+
+    /// Mint of the traded (non-SOL) token.
+    pub fn token_mint(&self) -> Pubkey {
+        match self.token_side() {
+            TokenSide::Base => self.base_mint,
+            TokenSide::Quote => self.quote_mint,
+        }
+    }
+
+    /// SPL Token program owning the traded token's mint.
+    pub fn token_program(&self) -> Pubkey {
+        match self.token_side() {
+            TokenSide::Base => self.base_token_program,
+            TokenSide::Quote => self.quote_token_program,
+        }
+    }
+
+    /// Pool reserves as `(sol_reserve, token_reserve)` given raw
+    /// `(base_reserve, quote_reserve)` amounts.
+    pub fn orient_reserves(&self, base_reserve: u64, quote_reserve: u64) -> (u64, u64) {
+        match self.token_side() {
+            TokenSide::Base => (quote_reserve, base_reserve),
+            TokenSide::Quote => (base_reserve, quote_reserve),
+        }
+    }
 }

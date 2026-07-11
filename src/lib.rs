@@ -56,7 +56,7 @@ pub use instruction::{
     transfer_creator_fees_to_pump_instruction, withdraw_instruction,
 };
 pub use math::{buy_amount_out, calc_amount_out, sell_amount_out};
-pub use state::{Pool, PoolInfo};
+pub use state::{Pool, PoolInfo, TokenSide};
 pub use util::{
     JitoPool, calc_lp_mint_pda, calc_pool_pda, calc_pool_pda_with_index,
     calc_user_pool_token_account, clone_keypairs, create_ata_token_or_not,

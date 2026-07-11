@@ -751,19 +751,15 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);
 
-        // Token side (base mint when quote is WSOL, otherwise quote mint).
-        let (token_mint, wsol_mint, token_program) = if pool_info.base_mint != WRAPPED_SOL_MINT {
-            (
-                pool_info.base_mint,
-                pool_info.quote_mint,
-                pool_info.base_token_program,
-            )
+        let token_mint = pool_info.token_mint();
+        let token_program = pool_info.token_program();
+        // Buy spends quote: fund the WSOL account only when WSOL IS the quote
+        // side; on SOL-base pools the quote spent is the token (from its ATA)
+        // and the WSOL account just receives the base out.
+        let wsol_lamports = if pool_info.sol_is_base() {
+            min_rent_exempt
         } else {
-            (
-                pool_info.quote_mint,
-                pool_info.base_mint,
-                pool_info.quote_token_program,
-            )
+            min_rent_exempt + max_quote_amount_in
         };
         instructions.extend(vec![
             system_instruction::create_account_with_seed(
@@ -771,11 +767,11 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
                 &wsol_acc,
                 payer,
                 &seed,
-                min_rent_exempt + max_quote_amount_in,
+                wsol_lamports,
                 span as u64,
                 &spl_token::ID,
             ),
-            initialize_account(&spl_token::ID, &wsol_acc, &wsol_mint, payer)?,
+            initialize_account(&spl_token::ID, &wsol_acc, &WRAPPED_SOL_MINT, payer)?,
         ]);
 
         let (ata_acc, ata_acc_inst) = create_ata_token_or_not_with_program(
@@ -789,14 +785,20 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             instructions.push(ata_inst);
         }
 
+        // The ix account list is positional over (base, quote).
+        let (user_base_acc, user_quote_acc) = if pool_info.sol_is_base() {
+            (&wsol_acc, &ata_acc)
+        } else {
+            (&ata_acc, &wsol_acc)
+        };
         instructions.push(make_buy_instruction(
             base_amount_out,
             max_quote_amount_in,
             track_volume,
             pool_info,
             payer,
-            &ata_acc,
-            &wsol_acc,
+            user_base_acc,
+            user_quote_acc,
         )?);
         instructions.push(spl_token_close_account(
             &spl_token::ID,
@@ -829,18 +831,13 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);
 
-        let (token_mint, wsol_mint, token_program) = if pool_info.base_mint != WRAPPED_SOL_MINT {
-            (
-                pool_info.base_mint,
-                pool_info.quote_mint,
-                pool_info.base_token_program,
-            )
+        let token_mint = pool_info.token_mint();
+        let token_program = pool_info.token_program();
+        // Quote is what's spent: fund WSOL only when WSOL is the quote side.
+        let wsol_lamports = if pool_info.sol_is_base() {
+            min_rent_exempt
         } else {
-            (
-                pool_info.quote_mint,
-                pool_info.base_mint,
-                pool_info.quote_token_program,
-            )
+            min_rent_exempt + spendable_quote_in
         };
         instructions.extend(vec![
             system_instruction::create_account_with_seed(
@@ -848,11 +845,11 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
                 &wsol_acc,
                 payer,
                 &seed,
-                min_rent_exempt + spendable_quote_in,
+                wsol_lamports,
                 span as u64,
                 &spl_token::ID,
             ),
-            initialize_account(&spl_token::ID, &wsol_acc, &wsol_mint, payer)?,
+            initialize_account(&spl_token::ID, &wsol_acc, &WRAPPED_SOL_MINT, payer)?,
         ]);
 
         let (ata_acc, ata_acc_inst) = create_ata_token_or_not_with_program(
@@ -866,14 +863,19 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             instructions.push(ata_inst);
         }
 
+        let (user_base_acc, user_quote_acc) = if pool_info.sol_is_base() {
+            (&wsol_acc, &ata_acc)
+        } else {
+            (&ata_acc, &wsol_acc)
+        };
         instructions.push(make_buy_exact_quote_in_instruction(
             spendable_quote_in,
             min_base_amount_out,
             track_volume,
             pool_info,
             payer,
-            &ata_acc,
-            &wsol_acc,
+            user_base_acc,
+            user_quote_acc,
         )?);
         instructions.push(spl_token_close_account(
             &spl_token::ID,
@@ -904,18 +906,14 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         let span = spl_token::state::Account::LEN;
         let min_rent_exempt = Rent::default().minimum_balance(span);
 
-        let (token_mint, wsol_mint, token_program) = if pool_info.base_mint != WRAPPED_SOL_MINT {
-            (
-                pool_info.base_mint,
-                pool_info.quote_mint,
-                pool_info.base_token_program,
-            )
+        let token_mint = pool_info.token_mint();
+        let token_program = pool_info.token_program();
+        // Sell spends base: on SOL-base pools the SOL being sold must be
+        // wrapped into the fresh WSOL account; otherwise it only receives.
+        let wsol_lamports = if pool_info.sol_is_base() {
+            min_rent_exempt + base_amount_in
         } else {
-            (
-                pool_info.quote_mint,
-                pool_info.base_mint,
-                pool_info.quote_token_program,
-            )
+            min_rent_exempt
         };
         instructions.extend(vec![
             system_instruction::create_account_with_seed(
@@ -923,11 +921,11 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
                 &wsol_acc,
                 payer,
                 &seed,
-                min_rent_exempt,
+                wsol_lamports,
                 span as u64,
                 &spl_token::ID,
             ),
-            initialize_account(&spl_token::ID, &wsol_acc, &wsol_mint, payer)?,
+            initialize_account(&spl_token::ID, &wsol_acc, &WRAPPED_SOL_MINT, payer)?,
         ]);
 
         let token_ata_in =
@@ -937,13 +935,18 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
                 &token_program,
             );
 
+        let (user_base_acc, user_quote_acc) = if pool_info.sol_is_base() {
+            (&wsol_acc, &token_ata_in)
+        } else {
+            (&token_ata_in, &wsol_acc)
+        };
         instructions.push(make_sell_instruction(
             base_amount_in,
             min_quote_amount_out,
             pool_info,
             payer,
-            &token_ata_in,
-            &wsol_acc,
+            user_base_acc,
+            user_quote_acc,
         )?);
         instructions.push(spl_token_close_account(
             &spl_token::ID,
@@ -956,6 +959,169 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             instructions.push(spl_token_close_account(
                 &token_program,
                 &token_ata_in,
+                payer,
+                payer,
+                &[],
+            )?);
+        }
+        Ok(instructions)
+    }
+
+    /// Build the instruction sequence to **buy the traded token with SOL**,
+    /// regardless of pool orientation ("spend exactly `sol_in` lamports,
+    /// receive ≥ `min_tokens_out`"):
+    /// - token-base pool (direct-launch style): pump-amm `buy_exact_quote_in`
+    /// - SOL-base pool (pump.fun-graduation style): pump-amm `sell`
+    ///
+    /// Sequence: optional pool extend, fresh seeded WSOL account funded with
+    /// `sol_in`, idempotent token-ATA create (when `create_ata`), the swap ix,
+    /// WSOL account close.
+    pub fn build_token_buy_ixs(
+        &self,
+        sol_in: u64,
+        min_tokens_out: u64,
+        track_volume: bool,
+        pool_info: &PoolInfo,
+        payer: &Pubkey,
+        create_ata: bool,
+    ) -> Result<Vec<Instruction>> {
+        let mut instructions: Vec<Instruction> = Vec::new();
+        if let Some(ix) = Self::maybe_extend_pool_ix(pool_info, payer)? {
+            instructions.push(ix);
+        }
+        let (wsol_acc, seed) = gen_pubkey_with_seed(payer)?;
+        let span = spl_token::state::Account::LEN;
+        let min_rent_exempt = Rent::default().minimum_balance(span);
+        instructions.extend(vec![
+            system_instruction::create_account_with_seed(
+                payer,
+                &wsol_acc,
+                payer,
+                &seed,
+                min_rent_exempt + sol_in,
+                span as u64,
+                &spl_token::ID,
+            ),
+            initialize_account(&spl_token::ID, &wsol_acc, &WRAPPED_SOL_MINT, payer)?,
+        ]);
+        let (token_ata, ata_ix) = create_ata_token_or_not_with_program(
+            payer,
+            &pool_info.token_mint(),
+            payer,
+            &pool_info.token_program(),
+            create_ata,
+        );
+        if let Some(ix) = ata_ix {
+            instructions.push(ix);
+        }
+        let swap_ix = if pool_info.sol_is_base() {
+            // Selling base (SOL) for quote (token): exact SOL in, min tokens out.
+            make_sell_instruction(
+                sol_in,
+                min_tokens_out,
+                pool_info,
+                payer,
+                &wsol_acc,
+                &token_ata,
+            )?
+        } else {
+            // Buying base (token) with exact quote (SOL) in.
+            make_buy_exact_quote_in_instruction(
+                sol_in,
+                min_tokens_out,
+                track_volume,
+                pool_info,
+                payer,
+                &token_ata,
+                &wsol_acc,
+            )?
+        };
+        instructions.push(swap_ix);
+        instructions.push(spl_token_close_account(
+            &spl_token::ID,
+            &wsol_acc,
+            payer,
+            payer,
+            &[],
+        )?);
+        Ok(instructions)
+    }
+
+    /// Build the instruction sequence to **sell the traded token for SOL**,
+    /// regardless of pool orientation ("spend exactly `tokens_in`, receive
+    /// ≥ `min_sol_out` lamports"):
+    /// - token-base pool: pump-amm `sell`
+    /// - SOL-base pool: pump-amm `buy_exact_quote_in`
+    ///
+    /// Sequence: optional pool extend, fresh rent-only seeded WSOL account
+    /// (SOL receiver), the swap ix, WSOL close (unwraps proceeds), optional
+    /// token-ATA close when emptying the position.
+    pub fn build_token_sell_ixs(
+        &self,
+        tokens_in: u64,
+        min_sol_out: u64,
+        pool_info: &PoolInfo,
+        payer: &Pubkey,
+        close_token_ata: bool,
+    ) -> Result<Vec<Instruction>> {
+        let mut instructions: Vec<Instruction> = Vec::new();
+        if let Some(ix) = Self::maybe_extend_pool_ix(pool_info, payer)? {
+            instructions.push(ix);
+        }
+        let (wsol_acc, seed) = gen_pubkey_with_seed(payer)?;
+        let span = spl_token::state::Account::LEN;
+        let min_rent_exempt = Rent::default().minimum_balance(span);
+        instructions.extend(vec![
+            system_instruction::create_account_with_seed(
+                payer,
+                &wsol_acc,
+                payer,
+                &seed,
+                min_rent_exempt,
+                span as u64,
+                &spl_token::ID,
+            ),
+            initialize_account(&spl_token::ID, &wsol_acc, &WRAPPED_SOL_MINT, payer)?,
+        ]);
+        let token_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+            payer,
+            &pool_info.token_mint(),
+            &pool_info.token_program(),
+        );
+        let swap_ix = if pool_info.sol_is_base() {
+            // Buying base (SOL) with exact quote (tokens) in.
+            make_buy_exact_quote_in_instruction(
+                tokens_in,
+                min_sol_out,
+                false,
+                pool_info,
+                payer,
+                &wsol_acc,
+                &token_ata,
+            )?
+        } else {
+            // Selling base (tokens) for quote (SOL): exact tokens in.
+            make_sell_instruction(
+                tokens_in,
+                min_sol_out,
+                pool_info,
+                payer,
+                &token_ata,
+                &wsol_acc,
+            )?
+        };
+        instructions.push(swap_ix);
+        instructions.push(spl_token_close_account(
+            &spl_token::ID,
+            &wsol_acc,
+            payer,
+            payer,
+            &[],
+        )?);
+        if close_token_ata {
+            instructions.push(spl_token_close_account(
+                &pool_info.token_program(),
+                &token_ata,
                 payer,
                 payer,
                 &[],
@@ -994,5 +1160,197 @@ pub async fn get_token_balance(
             ..
         }) if msg.contains("AccountNotFound") || msg.contains("could not find account") => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+    use crate::instruction::BuyExactQuoteInInstruction;
+    use solana_sdk::pubkey::Pubkey;
+
+    fn pool_info(sol_is_base: bool) -> PoolInfo {
+        let token = Pubkey::new_unique();
+        let (base_mint, quote_mint) = if sol_is_base {
+            (WRAPPED_SOL_MINT, token)
+        } else {
+            (token, WRAPPED_SOL_MINT)
+        };
+        PoolInfo {
+            pool: Pubkey::new_unique(),
+            pool_account_data_len: 300,
+            base_mint,
+            quote_mint,
+            lp_mint: Pubkey::new_unique(),
+            pool_base_token_account: Pubkey::new_unique(),
+            pool_quote_token_account: Pubkey::new_unique(),
+            creator: Pubkey::new_unique(),
+            coin_creator: Pubkey::new_unique(),
+            is_mayhem_mode: false,
+            is_cashback_coin: false,
+            base_token_program: spl_token::ID,
+            quote_token_program: spl_token::ID,
+        }
+    }
+
+    fn test_client() -> PumpSwapClient<std::sync::Arc<RpcClient>> {
+        PumpSwapClient::new(std::sync::Arc::new(RpcClient::new(
+            "http://localhost:1".to_string(),
+        )))
+    }
+
+    fn pump_amm_ix(ixs: &[Instruction]) -> &Instruction {
+        ixs.iter()
+            .find(|ix| ix.program_id == crate::PUMP_SWAP_PROGRAM_ID)
+            .expect("pump-amm ix present")
+    }
+
+    /// The ephemeral WSOL account = first account of the spl-token
+    /// `InitializeAccount` ix (data tag 1) in the built sequence.
+    fn wsol_seeded_account(ixs: &[Instruction]) -> Pubkey {
+        ixs.iter()
+            .find(|ix| ix.program_id == spl_token::ID && ix.data.first() == Some(&1))
+            .expect("initialize_account ix present")
+            .accounts[0]
+            .pubkey
+    }
+
+    #[test]
+    fn token_buy_uses_sell_ix_with_wsol_as_base_on_sol_base_pool() {
+        let client = test_client();
+        let info = pool_info(true);
+        let payer = Pubkey::new_unique();
+        let ixs = client
+            .build_token_buy_ixs(1_000_000, 1, true, &info, &payer, true)
+            .unwrap();
+        let ix = pump_amm_ix(&ixs);
+        assert_eq!(ix.data[..8], [51, 230, 133, 164, 1, 127, 131, 173]);
+        // account[5] = user_base_token_account must be the WSOL seeded account
+        assert_eq!(ix.accounts[5].pubkey, wsol_seeded_account(&ixs));
+        // account[6] = user_quote_token_account must be the token ATA
+        let token_ata = spl_associated_token_account::get_associated_token_address(
+            &payer,
+            &info.token_mint(),
+        );
+        assert_eq!(ix.accounts[6].pubkey, token_ata);
+    }
+
+    #[test]
+    fn token_buy_uses_buy_exact_quote_in_on_token_base_pool() {
+        let client = test_client();
+        let info = pool_info(false);
+        let payer = Pubkey::new_unique();
+        let ixs = client
+            .build_token_buy_ixs(1_000_000, 1, true, &info, &payer, true)
+            .unwrap();
+        let ix = pump_amm_ix(&ixs);
+        assert_eq!(ix.data[..8], BuyExactQuoteInInstruction::DISCRIMINATOR);
+        let token_ata = spl_associated_token_account::get_associated_token_address(
+            &payer,
+            &info.token_mint(),
+        );
+        assert_eq!(ix.accounts[5].pubkey, token_ata);
+        assert_eq!(ix.accounts[6].pubkey, wsol_seeded_account(&ixs));
+    }
+
+    #[test]
+    fn token_sell_uses_buy_exact_quote_in_on_sol_base_pool() {
+        let client = test_client();
+        let info = pool_info(true);
+        let payer = Pubkey::new_unique();
+        let ixs = client
+            .build_token_sell_ixs(500_000, 1, &info, &payer, false)
+            .unwrap();
+        let ix = pump_amm_ix(&ixs);
+        assert_eq!(ix.data[..8], BuyExactQuoteInInstruction::DISCRIMINATOR);
+        assert_eq!(ix.accounts[5].pubkey, wsol_seeded_account(&ixs));
+        let token_ata = spl_associated_token_account::get_associated_token_address(
+            &payer,
+            &info.token_mint(),
+        );
+        assert_eq!(ix.accounts[6].pubkey, token_ata);
+    }
+
+    #[test]
+    fn token_sell_uses_sell_ix_on_token_base_pool() {
+        let client = test_client();
+        let info = pool_info(false);
+        let payer = Pubkey::new_unique();
+        let ixs = client
+            .build_token_sell_ixs(500_000, 1, &info, &payer, false)
+            .unwrap();
+        let ix = pump_amm_ix(&ixs);
+        assert_eq!(ix.data[..8], [51, 230, 133, 164, 1, 127, 131, 173]);
+        let token_ata = spl_associated_token_account::get_associated_token_address(
+            &payer,
+            &info.token_mint(),
+        );
+        assert_eq!(ix.accounts[5].pubkey, token_ata);
+        assert_eq!(ix.accounts[6].pubkey, wsol_seeded_account(&ixs));
+    }
+
+    #[test]
+    fn legacy_builders_orient_user_accounts_on_sol_base_pool() {
+        let client = test_client();
+        let info = pool_info(true);
+        let payer = Pubkey::new_unique();
+        let token_ata = spl_associated_token_account::get_associated_token_address(
+            &payer,
+            &info.token_mint(),
+        );
+
+        let buy = client
+            .build_buy_ixs(1_000, 1_000_000, true, &info, &payer, true)
+            .unwrap();
+        let ix = pump_amm_ix(&buy);
+        assert_eq!(ix.accounts[5].pubkey, wsol_seeded_account(&buy));
+        assert_eq!(ix.accounts[6].pubkey, token_ata);
+
+        let sell = client
+            .build_sell_ixs(1_000_000, 1, &info, &payer, false)
+            .unwrap();
+        let ix = pump_amm_ix(&sell);
+        assert_eq!(ix.accounts[5].pubkey, wsol_seeded_account(&sell));
+        assert_eq!(ix.accounts[6].pubkey, token_ata);
+    }
+
+    #[test]
+    fn wsol_funding_matches_spend_side() {
+        let client = test_client();
+        let payer = Pubkey::new_unique();
+        let rent = Rent::default().minimum_balance(spl_token::state::Account::LEN);
+        let sol_in = 250_000_000u64;
+
+        let funding = |ixs: &[Instruction]| -> u64 {
+            // create_account_with_seed lamports arg lives in the first system ix
+            use solana_sdk::system_instruction::SystemInstruction;
+            for ix in ixs {
+                if ix.program_id == solana_sdk::system_program::ID {
+                    if let Ok(SystemInstruction::CreateAccountWithSeed { lamports, .. }) =
+                        bincode::deserialize::<SystemInstruction>(&ix.data)
+                    {
+                        return lamports;
+                    }
+                }
+            }
+            panic!("no create_account_with_seed found")
+        };
+
+        // token buy always wraps sol_in
+        for sol_base in [true, false] {
+            let info = pool_info(sol_base);
+            let ixs = client
+                .build_token_buy_ixs(sol_in, 1, true, &info, &payer, true)
+                .unwrap();
+            assert_eq!(funding(&ixs), rent + sol_in, "buy sol_base={sol_base}");
+        }
+        // token sell never wraps (receiver only)
+        for sol_base in [true, false] {
+            let info = pool_info(sol_base);
+            let ixs = client
+                .build_token_sell_ixs(1_000, 1, &info, &payer, false)
+                .unwrap();
+            assert_eq!(funding(&ixs), rent, "sell sol_base={sol_base}");
+        }
     }
 }
