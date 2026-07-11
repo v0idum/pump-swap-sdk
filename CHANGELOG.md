@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 - 2026-07-11
+
+### Fixed
+
+- **User swap accounts are now oriented per pool layout.** Pools created by
+  current pump.fun graduations store WSOL on the **base** side (~85% of live
+  PumpSwap volume); `build_buy_ixs`, `build_buy_exact_quote_in_ixs`, and
+  `build_sell_ixs` previously passed the user token ATA / WSOL account in
+  fixed (base, quote) order and funded the ephemeral WSOL account on the wrong
+  side, so every swap on a SOL-base pool failed with a token-mint mismatch
+  (`Custom(3)`). The builders now map accounts and WSOL funding from the pool's
+  actual mint orientation.
+
+### Added
+
+- Orientation-aware, trader-intent API: `build_token_buy_ixs` ("spend exactly
+  N lamports of SOL, receive >= M tokens") and `build_token_sell_ixs` ("spend
+  exactly N tokens, receive >= M lamports"), selecting the correct pump-amm
+  instruction per pool orientation (`buy_exact_quote_in`/`sell` on token-base
+  pools, `sell`/`buy_exact_quote_in` on SOL-base pools).
+- `PoolInfo::sol_is_base()`, `token_side()`, `token_mint()`, `token_program()`,
+  and `orient_reserves()` plus the `TokenSide` enum.
+- `examples/sim_trade_flow.rs`: verifies a full token buy + sell against the
+  live program via `simulateTransaction` on either pool orientation (no keys
+  required).
+
+### Compatibility
+
+- Existing method signatures are unchanged; behavior on token-base (canonical)
+  pools is identical. On SOL-base pools the legacy builders now produce
+  *working* instructions (previously guaranteed-failing), including the
+  corrected WSOL funding side.
+
 ## 0.3.0 - 2026-06-11
 
 ### Added
