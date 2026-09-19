@@ -487,7 +487,8 @@ pub fn make_claim_cashback_instruction(
 
 /// Build a pump-amm `extend_account` instruction. The official SDK prepends
 /// this before swap / liquidity instructions when an older pool account is
-/// smaller than the current 300-byte pool allocation.
+/// smaller than the current pool allocation of
+/// [`POOL_ACCOUNT_NEW_SIZE`](crate::POOL_ACCOUNT_NEW_SIZE) bytes.
 pub fn make_extend_account_instruction(account: &Pubkey, user: &Pubkey) -> Result<Instruction> {
     let accounts = vec![
         AccountMeta::new(*account, false),

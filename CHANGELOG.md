@@ -63,6 +63,60 @@
   `solana-keypair` 3.1.2 requires — the dependency graph does not compile
   without the pin.
 
+- **Two advisories cleared out of `Cargo.lock`.** Surfaced by the new
+  `cargo audit` job, both semver-compatible and both transitive:
+  `crossbeam-epoch` 0.9.18 -> 0.9.21 (RUSTSEC-2026-0204, invalid pointer
+  dereference in the `fmt::Pointer` impl for `Atomic` / `Shared`; reached via
+  `rayon` under `solana-streamer`) and `time` 0.3.41 -> 0.3.55
+  (RUSTSEC-2026-0009, denial of service via stack exhaustion; reached via
+  `x509-parser` under `solana-tls-utils`). No manifest requirement changed and
+  the resolved versions are still MSRV-compatible.
+
+- **`POOL_ACCOUNT_NEW_SIZE` corrected from 300 to 301.** Live mainnet pool
+  accounts allocate 301 bytes, not 300 — the three current-layout fixtures in
+  `tests/fixtures/pools/` are all exactly that long. The `extend_account` gate
+  compares `pool_account_data_len < POOL_ACCOUNT_NEW_SIZE`, so the wrong value
+  only mattered for a pool at exactly 300 bytes: it was classified as
+  current-layout and left un-extended. No account of that length is known on
+  mainnet, so no caller-visible behaviour changes. `src/client.rs` gained a
+  test module pinning the gate one byte below the boundary and at it, plus the
+  same decision against the real 271-byte legacy and 301-byte current
+  fixtures.
+
+  The pool decode path is untouched. `PoolInfo::from_account_data` reads
+  `virtual_quote_reserves` at `size_of::<Pool>() + 8` = 245, an offset derived
+  from the `Pool` struct and not from this constant, and still accepts
+  accounts on either side of it; `tests/wire_format.rs` continues to pin
+  `size_of::<Pool>() == 237`.
+
+### Added
+
+- **CI runs `cargo audit`.** A dedicated `audit` job installs `cargo-audit`
+  and audits `Cargo.lock` against the RustSec advisory database, so a
+  vulnerable transitive dependency fails the build instead of going unnoticed.
+
+  It runs with `--ignore RUSTSEC-2026-0258` (h2 0.3.26, unbounded empty DATA
+  frames). That one is patched in h2 0.4.16 and reaches the graph only via
+  `jito-sdk-rust` 0.3.2 -> `reqwest` 0.11.27 -> `hyper` 0.14 -> `h2` 0.3, so
+  it cannot be resolved here without `jito-sdk-rust` moving to `reqwest` 0.12.
+  The advisory concerns an HTTP/2 endpoint accepting inbound connections; this
+  SDK uses `reqwest` only as a client to POST Jito bundles and serves nothing.
+  The flag carries the same note in `ci.yml` and should be dropped when
+  `jito-sdk-rust` ships a `reqwest` 0.12 release.
+
+- **CI verifies the declared MSRV.** A new `msrv` job reads `rust-version`
+  out of `Cargo.toml` with `cargo metadata` instead of hardcoding it, installs
+  that exact toolchain, and runs `cargo build --all-targets --locked` and
+  `cargo test --all-targets --locked`. The MSRV raised to 1.97.1 above is now
+  tested rather than asserted, and the declared value cannot drift away from
+  the toolchain it is checked against.
+
+### Removed
+
+- `build.log` — two stray lines of `cargo run` output from an old
+  `verify_layout` run — is no longer committed, and `.gitignore` gained a
+  `*.log` rule so it does not come back.
+
 ## 0.5.0 - 2026-09-20
 
 ### Fixed
