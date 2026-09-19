@@ -45,7 +45,7 @@ Install from crates.io:
 
 ```toml
 [dependencies]
-pump-swap-sdk = "0.3.0"
+pump-swap-sdk = "0.5.0"
 ```
 
 Requires Rust 1.85+.
@@ -62,7 +62,7 @@ client types and an async runtime:
 
 ```toml
 [dependencies]
-pump-swap-sdk = "0.3.0"
+pump-swap-sdk = "0.5.0"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 solana-client = "2"

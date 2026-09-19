@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-09-20
 
 ### Fixed
 
@@ -93,6 +93,26 @@
 - `tests/fee_state.rs` with mainnet account fixtures for offline layout
   assertions, plus `#[ignore]`d live tests that act as a drift alarm for the
   hardcoded fee-recipient tables in `constants.rs`.
+
+### Compatibility
+
+- **Minor bump, not a patch: this release breaks source compatibility.** Two
+  changes need code edits. `buy_amount_out` / `sell_amount_out` take a `Fees`
+  argument and are oriented around trader intent rather than base/quote, and
+  `PoolInfo` gained the `virtual_quote_reserves` field, so struct literals
+  must be updated — `PoolInfo::from_account_data` is the supported
+  constructor.
+- **Quotes change value, by design.** Anything comparing a `min_out` against a
+  previously recorded number will see a different figure: the old one was too
+  optimistic by the pool's fee. Callers passing a slippage wide enough to
+  absorb the fee (5% or more) can narrow it; `DEFAULT_SLIPPAGE` is 0.5%.
+- `calc_amount_out` keeps its signature and its pure-curve behaviour, so
+  existing call sites compile unchanged — but it does not price a real swap
+  and should be replaced with `quote_token_buy` / `quote_token_sell`.
+- Unchanged: instruction layouts, account orders, PDA derivations, and every
+  instruction builder. This release does not alter a single byte sent on
+  chain.
+- MSRV stays at 1.85.
 
 ## 0.4.0 - 2026-07-11
 
