@@ -48,6 +48,19 @@ pub struct PoolInfo {
     pub coin_creator: Pubkey,
     pub is_mayhem_mode: bool,
     pub is_cashback_coin: bool,
+    /// Quote-side liquidity the program prices against but the pool's quote
+    /// token account does not hold.
+    ///
+    /// A `u64` stored immediately after `is_cashback_coin`, present in the
+    /// live account layout but **absent from the published IDL**, so
+    /// [`Pool`] does not carry it. pump-amm adds it to the quote token
+    /// account balance both when stepping the constant product and when
+    /// computing the pool's market cap for fee-tier selection; ignoring it
+    /// misprices affected pools by orders of magnitude. Zero for pools that
+    /// predate the field or never accrued any.
+    ///
+    /// See [`PoolInfo::effective_reserves`].
+    pub virtual_quote_reserves: u64,
     /// SPL Token program that owns the base mint (`spl_token::ID` or `spl_token_2022::ID`).
     pub base_token_program: Pubkey,
     /// SPL Token program that owns the quote mint (`spl_token::ID` or `spl_token_2022::ID`).
@@ -88,11 +101,79 @@ impl PoolInfo {
 
     /// Pool reserves as `(sol_reserve, token_reserve)` given raw
     /// `(base_reserve, quote_reserve)` amounts.
+    ///
+    /// These are the raw token-account balances. To price a swap, use
+    /// [`Self::effective_reserves`] first — the program prices against more
+    /// quote than the token account holds whenever
+    /// [`Self::virtual_quote_reserves`] is non-zero.
     pub fn orient_reserves(&self, base_reserve: u64, quote_reserve: u64) -> (u64, u64) {
         match self.token_side() {
             TokenSide::Base => (quote_reserve, base_reserve),
             TokenSide::Quote => (base_reserve, quote_reserve),
         }
+    }
+
+    /// Decode a pool account into a [`PoolInfo`].
+    ///
+    /// `data` is the raw account, discriminator included. The token programs
+    /// are supplied by the caller because they live on the mint accounts, not
+    /// on the pool; [`load_pool`](crate::util::load_pool) reads them for you.
+    ///
+    /// Accounts longer than the struct are accepted — the live allocation is
+    /// over-sized — and accounts shorter than the current layout decode with
+    /// [`Self::virtual_quote_reserves`] at zero, which is what the program
+    /// does for pools that predate the field.
+    pub fn from_account_data(
+        pool: Pubkey,
+        data: &[u8],
+        base_token_program: Pubkey,
+        quote_token_program: Pubkey,
+    ) -> Result<Self> {
+        let pool_size = size_of::<Pool>();
+        if data.len() < pool_size + 8 {
+            anyhow::bail!(
+                "Pool account too short: expected at least {}, got {}",
+                pool_size + 8,
+                data.len()
+            );
+        }
+        let pool_data = *bytemuck::from_bytes::<Pool>(&data[8..pool_size + 8]);
+
+        // A `u64` the live layout carries immediately after
+        // `is_cashback_coin`, absent from the published IDL and from older,
+        // shorter accounts. See [`Self::virtual_quote_reserves`].
+        let virtual_quote_reserves = data
+            .get(pool_size + 8..pool_size + 16)
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+
+        Ok(Self {
+            pool,
+            pool_account_data_len: data.len(),
+            base_mint: pool_data.base_mint,
+            quote_mint: pool_data.quote_mint,
+            lp_mint: pool_data.lp_mint,
+            pool_base_token_account: pool_data.pool_base_token_account,
+            pool_quote_token_account: pool_data.pool_quote_token_account,
+            creator: pool_data.creator,
+            coin_creator: pool_data.coin_creator,
+            is_mayhem_mode: pool_data.is_mayhem_mode != 0,
+            is_cashback_coin: pool_data.is_cashback_coin != 0,
+            virtual_quote_reserves,
+            base_token_program,
+            quote_token_program,
+        })
+    }
+
+    /// The `(base, quote)` reserves pump-amm actually prices against: raw
+    /// token-account balances with [`Self::virtual_quote_reserves`] added to
+    /// the quote side.
+    pub fn effective_reserves(&self, base_reserve: u64, quote_reserve: u64) -> (u64, u64) {
+        (
+            base_reserve,
+            quote_reserve.saturating_add(self.virtual_quote_reserves),
+        )
     }
 }
 
@@ -194,6 +275,28 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Quote mints the fee program prices off `stable_fee_tiers`.
+///
+/// Undetermined, and deliberately left that way. Of 136 pools observed on
+/// mainnet only three are ladder-priced without a SOL quote, and they do not
+/// agree with each other: one lands exactly on the stable ladder, the other
+/// two on neither ladder (one of them at 325 bps, past the top of both). The
+/// membership rule is therefore not something a single live sample settles,
+/// so [`crate::math::can_quote_fees`] rejects those pools outright instead of
+/// this function guessing at them. It returns `false` so a caller reaching
+/// [`FeeConfig::fees_for_pool`] directly gets the standard ladder, which at a
+/// given market cap is the more expensive of the two — the safe direction for
+/// a `min_out`.
+fn is_stable_quote_mint(_quote_mint: &Pubkey) -> bool {
+    false
+}
+
+/// `ceil(amount * bps / 10_000)` in u128, saturating back into a `u64`.
+fn ceil_div_bps(amount: u64, bps: u64) -> u64 {
+    let numerator = amount as u128 * bps as u128;
+    u64::try_from(numerator.div_ceil(10_000)).unwrap_or(u64::MAX)
+}
+
 /// Fee split applied to a swap, in basis points of the quote amount.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Fees {
@@ -210,6 +313,18 @@ impl Fees {
         self.lp_fee_bps
             .saturating_add(self.protocol_fee_bps)
             .saturating_add(self.creator_fee_bps)
+    }
+
+    /// The exact fee the program deducts from `amount`.
+    ///
+    /// **Not** `amount * total_bps / 10_000`: pump-amm rounds each component
+    /// up separately, so a three-way split can charge up to two lamports more
+    /// than a single rounded-up calculation on the combined rate.
+    pub fn fee_on(&self, amount: u64) -> u64 {
+        [self.lp_fee_bps, self.protocol_fee_bps, self.creator_fee_bps]
+            .into_iter()
+            .map(|bps| ceil_div_bps(amount, bps))
+            .fold(0u64, u64::saturating_add)
     }
 
     fn read(reader: &mut Reader<'_>) -> Result<Self> {
@@ -248,10 +363,18 @@ impl FeeTier {
 /// [`FEE_PROGRAM`](crate::constants::FEE_PROGRAM) and stored at
 /// [`fee_config_pda`](crate::util::fee_config_pda).
 ///
-/// The on-chain `get_fees` instruction picks between `flat_fees`, `fee_tiers`
-/// and `stable_fee_tiers` from the pool's market cap, trade size and mint;
-/// this type exposes the decoded ladders so callers can price a swap without
-/// a CPI. See [`FeeConfig::fee_tier_for_market_cap`].
+/// pump-amm does not call the `get_fees` instruction in the published IDL. On
+/// every swap it CPIs `GetFeesWithQuoteMint`, which takes
+/// `(is_pump_pool: bool, market_cap_lamports: u128, quote_mint: Pubkey)` and
+/// no trade size — confirmed by decoding the inner instruction of live swaps
+/// (mainnet, 2026-09-19). The ladder choice is therefore:
+///
+/// * `is_pump_pool == false` (non-SOL-quoted pools) → [`Self::flat_fees`]
+/// * otherwise → [`Self::fee_tiers`] indexed by market cap, or
+///   [`Self::stable_fee_tiers`] for a stablecoin quote mint
+///
+/// This type exposes the decoded ladders so callers can price a swap without
+/// a CPI. See [`FeeConfig::fees_for_pool`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FeeConfig {
     pub bump: u8,
@@ -284,8 +407,16 @@ impl FeeConfig {
     /// highest tier whose threshold is at or below it.
     ///
     /// Returns `None` only when the ladder is empty or every threshold sits
-    /// above `market_cap_lamports`; callers should fall back to
-    /// [`FeeConfig::flat_fees`].
+    /// above `market_cap_lamports`. Neither happens on the live account,
+    /// whose base rung has a threshold of `0`.
+    ///
+    /// **Do not fall back to [`FeeConfig::flat_fees`] here.** `flat_fees`
+    /// totals 30 bps and applies to pools the program flags as non-pump; the
+    /// ladder's base rung is 125 bps. Treating "no tier matched" as `flat_fees`
+    /// would under-charge a low-market-cap pool by 95 bps and produce a
+    /// `min_out` the program rejects. An empty ladder means the decoded
+    /// account is not what this SDK expects, so callers should surface that
+    /// rather than guess — [`FeeConfig::fees_for_pool`] returns the base rung.
     pub fn fee_tier_for_market_cap(&self, market_cap_lamports: u128) -> Option<&FeeTier> {
         Self::tier_for_market_cap(&self.fee_tiers, market_cap_lamports)
     }
@@ -294,6 +425,37 @@ impl FeeConfig {
     /// ladder.
     pub fn stable_fee_tier_for_market_cap(&self, market_cap_lamports: u128) -> Option<&FeeTier> {
         Self::tier_for_market_cap(&self.stable_fee_tiers, market_cap_lamports)
+    }
+
+    /// The fee schedule pump-amm's fee program returns for a pool, mirroring
+    /// its `GetFeesWithQuoteMint` instruction.
+    ///
+    /// `is_tiered` is the program's `is_pump_pool` argument — see
+    /// [`is_tiered_fee_pool`](crate::math::is_tiered_fee_pool). `quote_mint`
+    /// selects between the standard and stable ladders.
+    ///
+    /// When the ladder is empty (which the live account never is) this falls
+    /// back to the ladder's most expensive schedule rather than to
+    /// [`Self::flat_fees`], so a decoding surprise cannot silently under-quote
+    /// the fee.
+    pub fn fees_for_pool(
+        &self,
+        is_tiered: bool,
+        market_cap_lamports: u128,
+        quote_mint: &Pubkey,
+    ) -> Fees {
+        if !is_tiered {
+            return self.flat_fees;
+        }
+        let ladder = if is_stable_quote_mint(quote_mint) {
+            &self.stable_fee_tiers
+        } else {
+            &self.fee_tiers
+        };
+        Self::tier_for_market_cap(ladder, market_cap_lamports)
+            .or_else(|| ladder.first())
+            .map(|tier| tier.fees)
+            .unwrap_or(self.flat_fees)
     }
 
     fn tier_for_market_cap(tiers: &[FeeTier], market_cap_lamports: u128) -> Option<&FeeTier> {

@@ -12,7 +12,7 @@
 //! ```
 
 use pump_swap_sdk::{
-    BUYBACK_FEE_RECIPIENTS, FeeConfig, GlobalConfig, PROTOCOL_FEE_RECIPIENTS,
+    BUYBACK_FEE_RECIPIENTS, FeeConfig, Fees, GlobalConfig, PROTOCOL_FEE_RECIPIENTS,
     RESERVED_FEE_RECIPIENTS,
 };
 
@@ -249,4 +249,69 @@ mod live {
         );
         assert_eq!(fee_config.fee_tiers.len(), 25);
     }
+}
+
+/// Fee schedules the fee program actually returned, decoded from the
+/// `GetFeesWithQuoteMint` CPI and the swap event of live mainnet transactions
+/// on 2026-09-19. Each row is `(is_pump_pool, market_cap_lamports, fees)`.
+///
+/// A cashback pool is charged the tier's creator basis points as cashback
+/// instead, so the two are summed back into `creator_fee_bps` here.
+const OBSERVED_SCHEDULES: &[(bool, u128, Fees)] = &[
+    // pool HfpiSYjkviLNTHF8FjM8yCPauMwq5px2XMerSZPUKvdT — not a pump pool.
+    (false, 0, fees(25, 5, 0)),
+    // pool AF16XnzeaQdUnJMhXE3CQ6N13QHJLgH2mfquSdZVQo4e — cheapest rung.
+    (true, 155_988_215_454_556, fees(20, 5, 5)),
+    (true, 95_165_109_922_025, fees(20, 5, 8)),
+    (true, 85_235_430_439_200, fees(20, 5, 13)),
+    (true, 74_967_324_444_046, fees(20, 5, 18)),
+    (true, 65_090_408_441_691, fees(20, 5, 23)),
+    (true, 61_264_917_393_483, fees(20, 5, 25)),
+    (true, 53_969_221_648_203, fees(20, 5, 30)),
+    (true, 46_357_214_426_210, fees(20, 5, 35)),
+    (true, 37_584_591_767_307, fees(20, 5, 45)),
+    (true, 15_869_836_765_263, fees(20, 5, 65)),
+    (true, 10_690_600_722_838, fees(20, 5, 70)),
+    (true, 5_470_616_941_054, fees(20, 5, 75)),
+    (true, 3_684_524_298_250, fees(20, 5, 80)),
+    (true, 2_692_043_212_031, fees(20, 5, 85)),
+    (true, 1_917_839_092_121, fees(20, 5, 90)),
+    (true, 1_046_767_344_422, fees(20, 5, 95)),
+    // pool 2Y8QhdP4Zox3mTKiJNpCQiFqUncHDE69LKZnTyvFjeqG — base rung, 125 bps.
+    (true, 162_452_108_672, fees(2, 93, 30)),
+];
+
+const fn fees(lp_fee_bps: u64, protocol_fee_bps: u64, creator_fee_bps: u64) -> Fees {
+    Fees {
+        lp_fee_bps,
+        protocol_fee_bps,
+        creator_fee_bps,
+    }
+}
+
+#[test]
+fn fees_for_pool_reproduces_every_observed_mainnet_schedule() {
+    let config = fee_config();
+    let quote_mint = solana_sdk::pubkey::Pubkey::new_unique();
+
+    for (is_tiered, market_cap, expected) in OBSERVED_SCHEDULES {
+        assert_eq!(
+            config.fees_for_pool(*is_tiered, *market_cap, &quote_mint),
+            *expected,
+            "is_tiered={is_tiered} market_cap={market_cap}"
+        );
+    }
+}
+
+/// The dangerous direction: a pool the program does price off the ladder must
+/// never be quoted at `flat_fees`, which is 95 bps cheaper than the base rung.
+#[test]
+fn a_tiered_pool_below_every_threshold_gets_the_base_rung_not_the_flat_fee() {
+    let config = fee_config();
+    let quote_mint = solana_sdk::pubkey::Pubkey::new_unique();
+
+    let base = config.fees_for_pool(true, 0, &quote_mint);
+    assert_eq!(base.total_bps(), 125);
+    assert_ne!(base, config.flat_fees);
+    assert_eq!(config.flat_fees.total_bps(), 30);
 }
