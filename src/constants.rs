@@ -11,9 +11,17 @@ pub const PUMPFUN_PROGRAM: Pubkey = pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M
 /// `distribute_creator_fees` instruction.
 pub const PUMPFUN_EVENT_AUTHORITY: Pubkey = pubkey!("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");
 
-/// pump.fun creator-vault account that receives accrued creator fees from
-/// the pump-amm `transfer_creator_fees_to_pump` instruction before they're
-/// distributed via `distribute_creator_fees`.
+/// One coin's pump.fun creator vault, kept only so the constant does not
+/// disappear from the public API.
+///
+/// The creator vault is **per creator**, not global: pump.fun derives it as
+/// `["creator-vault", creator]`, which
+/// [`pump_creator_vault_pda`](crate::util::pump_creator_vault_pda) computes.
+/// This address is one such PDA and is wrong for every other coin.
+#[deprecated(
+    since = "0.6.0",
+    note = "the creator vault is per creator; use util::pump_creator_vault_pda(creator)"
+)]
 pub const PUMP_CREATOR_VAULT: Pubkey = pubkey!("8CoWk2ZYjsBZEy8yLqWEK9mtZ8tkAbAFrbmtyyuhEqGg");
 
 /// pump fee program — owns fee_config and exposes `get_fees`.

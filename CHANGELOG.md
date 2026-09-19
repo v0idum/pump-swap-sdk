@@ -63,11 +63,51 @@
   split and a paused config with a revoked admin and stale trailing bytes —
   plus `#[ignore]`d tests against live chain state.
 
-  This release decodes the account only; routing creator fees through a split
-  when `pool.coin_creator` is a `SharingConfig` PDA is not yet wired into the
-  fee-collection builders.
+- **Fee routing for fee-sharing pools.** `PoolInfo::fee_sharing_config()`
+  returns the coin's config address when a pool's `coin_creator` is that
+  config, which is what `migrate_pool_coin_creator` writes there. It is keyed
+  on `pool.base_mint`, matching the program's own PDA constraint and the
+  official TypeScript SDK's `feeSharingConfigPda(pool.baseMint)`; verified
+  against six live migrated pools, all token-base with a wSOL quote.
+
+  Such a pool cannot use `collect_coin_creator_fee` — pump-amm rejects it with
+  `CreatorVaultMigratedToSharingConfig`. Its fees leave through
+  `transfer_creator_fees_to_pump`, and pump.fun's `distribute_creator_fees`
+  pays the shareholders. `PumpSwapClient::build_creator_fee_withdraw_ixs` now
+  composes exactly that, reading the shareholders from the live config.
+
+- **`transfer_creator_fees_to_pump_v2_instruction` and
+  `distribute_creator_fees_v2_instruction`**, the any-quote-mint forms of the
+  two payout instructions. Both take a `payer` that signs and funds the quote
+  ATAs they create; `distribute_creator_fees_v2` also takes `initialize_ata`,
+  which lets the program create a shareholder's missing quote ATA.
+  `PumpSwapClient::build_creator_fee_withdraw_ixs_v2` composes the pair.
+
+- **PDA helpers `bonding_curve_pda` and `pump_creator_vault_pda`**
+  (`["bonding-curve", mint]` and `["creator-vault", creator]`, both under
+  pump.fun). Note `pump_creator_vault_pda`'s hyphen: pump-amm's own
+  `find_coin_creator_vault_authority` seeds on `"creator_vault"` with an
+  underscore, and the two land on different addresses for the same creator.
 
 ### Changed
+
+- **`PUMP_CREATOR_VAULT` is deprecated.** It is one coin's creator vault, not
+  a global account; use `util::pump_creator_vault_pda(creator)`.
+
+- **Breaking: `distribute_creator_fees_instruction`,
+  `PumpSwapClient::build_creator_fee_withdraw_ixs` and
+  `PumpSwapClient::withdraw_creator_fees` take fewer arguments.** The bonding
+  curve, sharing config and coin creator were parameters; all three derive
+  from the mint, and passing them separately let a caller pair a mint with
+  another coin's config. `build_creator_fee_withdraw_ixs` is now `async`,
+  because it reads the shareholders from chain.
+
+  ```rust
+  // before
+  client.withdraw_creator_fees(&admin, &coin_creator, &mint, &bonding_curve, &sharing_config).await?;
+  // after
+  client.withdraw_creator_fees(&admin, &mint).await?;
+  ```
 
 - **Dependencies brought up to their latest stable majors.** `solana-client`
   2.1.5 → 4.3.0, `solana-sdk` 2.1.5 → 4.1.0, `spl-token` 7 → 9,
@@ -121,6 +161,28 @@
   with `solana-client` 4.3.0.
 
 ### Fixed
+
+- **`distribute_creator_fees_instruction` built an instruction the program
+  could not accept.** Three faults, each independently fatal:
+
+  1. It passed the `PUMP_CREATOR_VAULT` constant as the creator vault. The
+     vault is per creator — `["creator-vault", BondingCurve.creator]` — so
+     that address was correct for exactly one coin and failed a seeds
+     constraint for every other.
+  2. It passed no shareholder accounts. The program matches its remaining
+     accounts against the config's shareholders position by position and
+     fails with `ShareholdersAndRemainingAccountsMismatch` when they differ,
+     so a payout with none could never succeed.
+  3. It appended an `admin_account` signer the instruction does not declare.
+     The flow is permissionless; only the transaction's fee payer signs.
+
+  The builder now takes `(mint, shareholders)` and derives the bonding curve,
+  sharing config and creator vault itself. Its account list is asserted
+  against a mainnet payout that paid five shareholders at slot 430_382_254.
+
+- **`transfer_creator_fees_to_pump_instruction` passed the same wrong creator
+  vault**, sending the sweep to a different coin's vault than the one
+  `distribute_creator_fees` draws from. It now derives it.
 
 - `Cargo.lock` pins `five8_core` to 1.0.0. `five8` 1.0.0 requests
   `five8_core >=0.1.1, <2` and cargo would otherwise select 0.1.2, whose

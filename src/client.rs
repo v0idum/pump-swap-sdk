@@ -4,12 +4,13 @@ use crate::constants::{
 };
 use crate::instruction::{
     create_pool_instruction_with_options, distribute_creator_fees_instruction,
-    make_buy_exact_quote_in_instruction, make_buy_instruction, make_claim_cashback_instruction,
-    make_claim_token_incentives_instruction, make_close_user_volume_accumulator_instruction,
-    make_collect_coin_creator_fee_instruction, make_deposit_instruction,
-    make_extend_account_instruction, make_init_user_volume_accumulator_instruction,
-    make_sell_instruction, make_sync_user_volume_accumulator_instruction,
-    transfer_creator_fees_to_pump_instruction, withdraw_instruction,
+    distribute_creator_fees_v2_instruction, make_buy_exact_quote_in_instruction,
+    make_buy_instruction, make_claim_cashback_instruction, make_claim_token_incentives_instruction,
+    make_close_user_volume_accumulator_instruction, make_collect_coin_creator_fee_instruction,
+    make_deposit_instruction, make_extend_account_instruction,
+    make_init_user_volume_accumulator_instruction, make_sell_instruction,
+    make_sync_user_volume_accumulator_instruction, transfer_creator_fees_to_pump_instruction,
+    transfer_creator_fees_to_pump_v2_instruction, withdraw_instruction,
 };
 use crate::math::{
     SwapQuote, can_quote_fees, is_tiered_fee_pool, market_cap_lamports, quote_buy_exact_quote_in,
@@ -784,6 +785,12 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
 
     /// Build a `collect_coin_creator_fee` instruction set. Creates the coin
     /// creator's quote-token ATA idempotently when requested.
+    ///
+    /// This is the single-creator route. A coin whose fees are split has no
+    /// vault to collect from — pump-amm rejects the instruction with
+    /// `CreatorVaultMigratedToSharingConfig` — so route those through
+    /// [`Self::build_creator_fee_withdraw_ixs`] instead.
+    /// [`PoolInfo::fee_sharing_config`] tells the two apart.
     pub fn build_collect_coin_creator_fee_ixs(
         &self,
         coin_creator: &Pubkey,
@@ -951,32 +958,24 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         Ok(())
     }
 
-    /// Withdraw accrued creator fees: transfers the coin-creator vault balance
-    /// into the pump.fun program's creator vault, then triggers a distribution.
+    /// Withdraw a fee-sharing coin's accrued creator fees: sweep the pump-amm
+    /// coin-creator vault into pump.fun's creator vault, then pay the coin's
+    /// shareholders out of it.
+    ///
+    /// `admin` only signs and pays — the flow is permissionless, and the
+    /// shareholders are whoever the coin's
+    /// [`SharingConfig`] lists, not the signer.
     ///
     /// Convenience wrapper using **500,000 CU limit** and **50,000
     /// micro-lamport CU price**. For custom values, compose your own
     /// transaction from [`Self::build_creator_fee_withdraw_ixs`].
-    pub async fn withdraw_creator_fees(
-        &self,
-        admin: &Keypair,
-        coin_creator: &Pubkey,
-        token_mint: &Pubkey,
-        bonding_curve: &Pubkey,
-        sharing_config: &Pubkey,
-    ) -> Result<()> {
-        info!("Withdrawing creator fees for: {}", admin.pubkey());
+    pub async fn withdraw_creator_fees(&self, admin: &Keypair, token_mint: &Pubkey) -> Result<()> {
+        info!("Withdrawing creator fees for mint {token_mint}");
         let mut instructions: Vec<Instruction> = vec![
             ComputeBudgetInstruction::set_compute_unit_limit(500_000),
             ComputeBudgetInstruction::set_compute_unit_price(50_000),
         ];
-        instructions.extend(self.build_creator_fee_withdraw_ixs(
-            coin_creator,
-            token_mint,
-            bonding_curve,
-            sharing_config,
-            &admin.pubkey(),
-        )?);
+        instructions.extend(self.build_creator_fee_withdraw_ixs(token_mint).await?);
         let mut tx = Transaction::new_with_payer(&instructions, Some(&admin.pubkey()));
         tx.sign(&[admin], self.rpc.get_latest_blockhash().await?);
         let result = self.rpc.send_and_confirm_transaction(&tx).await?;
@@ -984,24 +983,93 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         Ok(())
     }
 
-    /// Compose the two-instruction creator-fee withdraw flow.
-    pub fn build_creator_fee_withdraw_ixs(
+    /// Compose the two-instruction WSOL creator-fee payout for a fee-sharing
+    /// coin: `transfer_creator_fees_to_pump` followed by
+    /// `distribute_creator_fees`.
+    ///
+    /// Fetches the coin's [`SharingConfig`] to
+    /// fill in the shareholder accounts, which
+    /// `distribute_creator_fees` requires verbatim and in order. Errors when
+    /// the coin has no config — a coin whose fees go to a single creator
+    /// collects them with [`Self::build_collect_coin_creator_fee_ixs`]
+    /// instead — and when the config is not
+    /// [`Active`](crate::state::ConfigStatus::Active), which the program
+    /// rejects with `SharingConfigNotActive`.
+    ///
+    /// Both instructions no-op or fail on an empty vault: the sweep skips a
+    /// balance below the token-account rent minimum, and the payout requires
+    /// the vault to hold at least pump.fun's minimum distributable amount.
+    ///
+    /// For a non-WSOL quote mint use [`Self::build_creator_fee_withdraw_ixs_v2`].
+    pub async fn build_creator_fee_withdraw_ixs(
         &self,
-        coin_creator: &Pubkey,
         token_mint: &Pubkey,
-        bonding_curve: &Pubkey,
-        sharing_config: &Pubkey,
-        admin_account: &Pubkey,
     ) -> Result<Vec<Instruction>> {
+        let shareholders = self.active_shareholders(token_mint).await?;
         Ok(vec![
-            transfer_creator_fees_to_pump_instruction(coin_creator)?,
-            distribute_creator_fees_instruction(
+            transfer_creator_fees_to_pump_instruction(&sharing_config_pda(token_mint))?,
+            distribute_creator_fees_instruction(token_mint, &shareholders)?,
+        ])
+    }
+
+    /// [`Self::build_creator_fee_withdraw_ixs`] for a coin quoted in something
+    /// other than WSOL, using the `_v2` form of both instructions.
+    ///
+    /// `payer` signs both and funds any account they have to create: the pump
+    /// creator vault's quote ATA, and — when `initialize_shareholder_atas` is
+    /// set — a shareholder's missing quote ATA. With that flag off, a
+    /// shareholder without a quote ATA fails the payout.
+    pub async fn build_creator_fee_withdraw_ixs_v2(
+        &self,
+        payer: &Pubkey,
+        token_mint: &Pubkey,
+        quote_mint: &Pubkey,
+        quote_token_program: &Pubkey,
+        initialize_shareholder_atas: bool,
+    ) -> Result<Vec<Instruction>> {
+        let shareholders = self.active_shareholders(token_mint).await?;
+        Ok(vec![
+            transfer_creator_fees_to_pump_v2_instruction(
+                payer,
+                &sharing_config_pda(token_mint),
+                quote_mint,
+                quote_token_program,
+            )?,
+            distribute_creator_fees_v2_instruction(
+                payer,
                 token_mint,
-                bonding_curve,
-                sharing_config,
-                admin_account,
+                quote_mint,
+                quote_token_program,
+                initialize_shareholder_atas,
+                &shareholders,
             )?,
         ])
+    }
+
+    /// Shareholder addresses of `token_mint`'s sharing config, in stored
+    /// order, rejecting a coin that has no config or whose config is paused.
+    async fn active_shareholders(&self, token_mint: &Pubkey) -> Result<Vec<Pubkey>> {
+        let config = self
+            .fetch_sharing_config(token_mint)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "{token_mint} has no SharingConfig at {}; its creator fees are not split, \
+                     collect them with build_collect_coin_creator_fee_ixs",
+                    sharing_config_pda(token_mint)
+                )
+            })?;
+        if !config.is_active() {
+            anyhow::bail!(
+                "SharingConfig for {token_mint} is {:?}; pump.fun rejects a payout from it",
+                config.status
+            );
+        }
+        Ok(config
+            .shareholders
+            .iter()
+            .map(|holder| holder.address)
+            .collect())
     }
 
     fn maybe_extend_pool_ix(pool_info: &PoolInfo, payer: &Pubkey) -> Result<Option<Instruction>> {

@@ -383,9 +383,9 @@ cargo doc --open
   instruction builders.
 - `create_pool_instruction`,
   `create_pool_instruction_with_options`,
-  `transfer_creator_fees_to_pump_instruction`,
-  `distribute_creator_fees_instruction`: additional pump-amm and pump.fun
-  instruction builders.
+  `transfer_creator_fees_to_pump_instruction` (+`_v2`),
+  `distribute_creator_fees_instruction` (+`_v2`): additional pump-amm and
+  pump.fun instruction builders.
 - `load_pool`, `load_pool_with_token_program`: pool account decoding helpers.
 - `GlobalConfig`, `FeeConfig`, `Fees`, `FeeTier`: decoded on-chain fee state.
   `GlobalConfig::from_account_data` and `FeeConfig::from_account_data` decode
@@ -404,12 +404,21 @@ cargo doc --open
   owned by the fee program at `sharing_config_pda(mint)`
   (`["sharing-config", mint]`). `SharingConfig::from_account_data` decodes raw
   bytes; `PumpSwapClient::fetch_sharing_config` fetches one, returning
-  `Ok(None)` for a coin with no split. Decoding only — the fee-collection
-  builders do not yet route through a split.
+  `Ok(None)` for a coin with no split.
+- `PoolInfo::fee_sharing_config()`: the coin's config address when this pool's
+  creator fees are split, `None` otherwise. Fee-sharing pools cannot use
+  `collect_coin_creator_fee` — pump-amm rejects it with
+  `CreatorVaultMigratedToSharingConfig`. Their fees go out through
+  `transfer_creator_fees_to_pump` and pump.fun's `distribute_creator_fees`,
+  which `PumpSwapClient::build_creator_fee_withdraw_ixs` composes (and
+  `build_creator_fee_withdraw_ixs_v2` for a non-wSOL quote). The payout's
+  remaining accounts must be the config's shareholders, in stored order; both
+  helpers read them from chain.
 - `calc_amount_out`, `buy_amount_out`, `sell_amount_out`: quote math helpers.
 - PDA helpers such as `calc_pool_pda`, `calc_lp_mint_pda`,
   `find_coin_creator_vault_authority`, `find_coin_creator_vault_ata`,
-  `find_user_vol_accumulator`, `fee_config_pda`, and `sharing_config_pda`.
+  `find_user_vol_accumulator`, `fee_config_pda`, `sharing_config_pda`,
+  `bonding_curve_pda`, and `pump_creator_vault_pda`.
 - `JitoPool`, `send_jito_bundle`, `send_bundle_with_retry`: Jito bundle
   helpers.
 

@@ -1,6 +1,6 @@
 use crate::constants::{
     BUYBACK_FEE_RECIPIENTS, FEE_PROGRAM, PROTOCOL_FEE_RECIPIENTS, PUMP_SWAP_PROGRAM_ID,
-    RESERVED_FEE_RECIPIENTS,
+    PUMPFUN_PROGRAM, RESERVED_FEE_RECIPIENTS,
 };
 use crate::state::{Pool, PoolInfo};
 use anyhow::{Result, anyhow};
@@ -360,6 +360,28 @@ pub fn fee_config_pda() -> Pubkey {
 /// everything else the derived address is empty.
 pub fn sharing_config_pda(mint: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"sharing-config", mint.as_ref()], &FEE_PROGRAM).0
+}
+
+/// PDA: `["bonding-curve", mint]` under pump.fun.
+///
+/// The coin's bonding curve. Required by pump.fun's `distribute_creator_fees`,
+/// which reads the curve's `creator` to derive the creator vault.
+pub fn bonding_curve_pda(mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bonding-curve", mint.as_ref()], &PUMPFUN_PROGRAM).0
+}
+
+/// PDA: `["creator-vault", creator]` under pump.fun.
+///
+/// Where `transfer_creator_fees_to_pump` deposits and
+/// `distribute_creator_fees` pays out from. Note the hyphen: pump-amm's own
+/// vault authority uses `"creator_vault"` with an underscore, and the two
+/// derive different addresses from the same creator — see
+/// [`find_coin_creator_vault_authority`].
+///
+/// `creator` is the pump.fun `BondingCurve.creator`, which for a fee-sharing
+/// coin is the coin's [`sharing_config_pda`].
+pub fn pump_creator_vault_pda(creator: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &PUMPFUN_PROGRAM).0
 }
 
 /// PDA: `["pool-v2", base_mint]` under pump-amm. Required as a remaining
