@@ -11,8 +11,11 @@ use crate::instruction::{
     make_sell_instruction, make_sync_user_volume_accumulator_instruction,
     transfer_creator_fees_to_pump_instruction, withdraw_instruction,
 };
-use crate::math::calc_amount_out;
-use crate::state::{FeeConfig, GlobalConfig, PoolInfo};
+use crate::math::{
+    SwapQuote, can_quote_fees, is_tiered_fee_pool, market_cap_lamports, quote_buy_exact_quote_in,
+    quote_sell, token_buy_quote, token_sell_quote,
+};
+use crate::state::{FeeConfig, Fees, GlobalConfig, PoolInfo};
 use crate::util::{
     calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
     create_ata_token_or_not_with_program, fee_config_pda, gen_pubkey_with_seed, load_pool,
@@ -32,6 +35,13 @@ use spl_token::instruction::{close_account as spl_token_close_account, initializ
 use spl_token::solana_program::program_pack::Pack;
 use std::ops::Deref;
 use tokio::time::{Duration, sleep};
+
+/// Slippage the convenience methods apply, as a fraction.
+///
+/// Before quotes accounted for fees this had to cover the pool's fee as well,
+/// which is why the helpers used 1–10%. Now that [`crate::math`] subtracts the
+/// real fee, 50 bps is a slippage budget and nothing else.
+pub const DEFAULT_SLIPPAGE: f64 = 0.005;
 
 /// Async client wrapping an [`RpcClient`] with high-level pump-amm helpers.
 ///
@@ -89,13 +99,15 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// let client = PumpSwapClient::new(rpc);
     /// let (global_config, fee_config) = client.fetch_fee_state().await?;
     ///
-    /// // Total fee charged on a standard pool at a given market cap. Pools
-    /// // below every tier threshold fall back to the flat fee schedule.
+    /// // Total fee on a SOL-quoted pool at a given market cap. `flat_fees` is
+    /// // not a fallback for "no tier matched" — it is the schedule for pools
+    /// // the program does not price off the ladder at all, and it is 95 bps
+    /// // cheaper than the ladder's base rung.
     /// let market_cap_lamports = 5_000_000_000_000u128;
+    /// let quote_mint = pump_swap_sdk::WRAPPED_SOL_MINT;
     /// let total_bps = fee_config
-    ///     .fee_tier_for_market_cap(market_cap_lamports)
-    ///     .map(|tier| tier.fees.total_bps())
-    ///     .unwrap_or_else(|| fee_config.flat_fees.total_bps());
+    ///     .fees_for_pool(true, market_cap_lamports, &quote_mint)
+    ///     .total_bps();
     ///
     /// println!(
     ///     "total {total_bps} bps, coin creator {} bps",
@@ -123,6 +135,110 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             GlobalConfig::from_account_data(&global_config.data)?,
             FeeConfig::from_account_data(&fee_config.data)?,
         ))
+    }
+
+    /// The fee schedule pump-amm will charge on a swap in `pool`, derived the
+    /// way the program derives it.
+    ///
+    /// One `getMultipleAccounts` for the fee program's `FeeConfig` and the
+    /// pool's base mint — the mint supply is what turns reserves into the
+    /// market cap the fee tier is selected on. Pass reserves you already have
+    /// from [`Self::fetch_pool_reserves`].
+    pub async fn fetch_pool_fees(
+        &self,
+        pool: &PoolInfo,
+        base_reserve: u64,
+        quote_reserve: u64,
+    ) -> Result<Fees> {
+        if !can_quote_fees(pool) {
+            anyhow::bail!(
+                "pool {} is priced off the fee ladder but quoted in {}, not SOL; \
+                 the fee program's schedule for those pools is not one this SDK \
+                 can reproduce (observed 30-325 bps against a ladder that tops \
+                 out at 125), so quoting it would under-charge the fee and \
+                 produce a min_out the program rejects",
+                pool.pool,
+                pool.quote_mint,
+            );
+        }
+        let fee_config_key = fee_config_pda();
+        let accounts = self
+            .rpc
+            .get_multiple_accounts(&[fee_config_key, pool.base_mint])
+            .await?;
+
+        let fee_config = accounts
+            .first()
+            .and_then(|a| a.as_ref())
+            .ok_or_else(|| anyhow!("FeeConfig account {fee_config_key} not found"))?;
+        let fee_config = FeeConfig::from_account_data(&fee_config.data)?;
+
+        let base_mint = accounts
+            .get(1)
+            .and_then(|a| a.as_ref())
+            .ok_or_else(|| anyhow!("base mint account {} not found", pool.base_mint))?;
+        let base_supply = mint_supply(&base_mint.data)?;
+
+        Ok(Self::fees_from_state(
+            &fee_config,
+            pool,
+            base_supply,
+            base_reserve,
+            quote_reserve,
+        ))
+    }
+
+    /// Pure half of [`Self::fetch_pool_fees`], for callers that already hold
+    /// the fee config and the base mint supply.
+    ///
+    /// Unlike [`Self::fetch_pool_fees`] this does not reject pools whose fee
+    /// schedule the SDK cannot reproduce — check
+    /// [`crate::math::can_quote_fees`] first.
+    pub fn fees_from_state(
+        fee_config: &FeeConfig,
+        pool: &PoolInfo,
+        base_supply: u64,
+        base_reserve: u64,
+        quote_reserve: u64,
+    ) -> Fees {
+        let is_tiered = is_tiered_fee_pool(pool);
+        let (base, quote) = pool.effective_reserves(base_reserve, quote_reserve);
+        // The program passes 0 for pools it does not price off the ladder,
+        // and the market cap is meaningless for them anyway.
+        let market_cap = if is_tiered {
+            market_cap_lamports(base_supply, base, quote)
+        } else {
+            0
+        };
+        fee_config.fees_for_pool(is_tiered, market_cap, &pool.quote_mint)
+    }
+
+    /// Quote "spend exactly `sol_in` lamports, receive tokens" against live
+    /// chain state, matching [`Self::build_token_buy_ixs`].
+    ///
+    /// Pass [`SwapQuote::min_amount_out`] as that builder's `min_tokens_out`.
+    pub async fn quote_token_buy(
+        &self,
+        sol_in: u64,
+        pool: &PoolInfo,
+        slippage: f64,
+    ) -> Result<SwapQuote> {
+        let reserves = self.fetch_pool_reserves(pool).await?;
+        let fees = self.fetch_pool_fees(pool, reserves.0, reserves.1).await?;
+        Ok(token_buy_quote(sol_in, reserves, pool, fees, slippage))
+    }
+
+    /// Quote "spend exactly `tokens_in` base units, receive lamports" against
+    /// live chain state, matching [`Self::build_token_sell_ixs`].
+    pub async fn quote_token_sell(
+        &self,
+        tokens_in: u64,
+        pool: &PoolInfo,
+        slippage: f64,
+    ) -> Result<SwapQuote> {
+        let reserves = self.fetch_pool_reserves(pool).await?;
+        let fees = self.fetch_pool_fees(pool, reserves.0, reserves.1).await?;
+        Ok(token_sell_quote(tokens_in, reserves, pool, fees, slippage))
     }
 
     /// Fetch raw base/quote reserves (in token base units) for a pool.
@@ -177,8 +293,10 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
 
     /// Simulate a sell against the connected RPC. Logs the simulation result.
     ///
-    /// Convenience wrapper that uses **1% slippage** by default. For custom
-    /// slippage / compute-budget, build the instructions yourself with
+    /// Convenience wrapper using [`DEFAULT_SLIPPAGE`] on a fee-aware quote —
+    /// the fee is subtracted before slippage, so the floor is not silently
+    /// padded. For custom slippage / compute-budget, build the instructions
+    /// yourself with
     /// [`Self::build_sell_ixs`] and submit them through your own simulation
     /// or send path.
     pub async fn simulate_sell(
@@ -188,7 +306,11 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         keypair: &Keypair,
     ) -> Result<()> {
         let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
-        let amount_out = calc_amount_out(amount_in, base_reserve, quote_reserve, 0.01);
+        let fees = self
+            .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
+            .await?;
+        let (base, quote) = pool_info.effective_reserves(base_reserve, quote_reserve);
+        let amount_out = quote_sell(amount_in, base, quote, fees, DEFAULT_SLIPPAGE).min_amount_out;
         debug!("Sell amount out: {}", amount_out);
         let mut tx = Transaction::new_with_payer(
             &self.build_sell_ixs(amount_in, amount_out, pool_info, &keypair.pubkey(), true)?,
@@ -202,8 +324,10 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
 
     /// Simulate a buy against the connected RPC. Logs the simulation result.
     ///
-    /// Convenience wrapper that uses **1% slippage** by default. For custom
-    /// slippage / compute-budget, build the instructions yourself with
+    /// Convenience wrapper using [`DEFAULT_SLIPPAGE`] on a fee-aware quote —
+    /// the fee is subtracted before slippage, so the floor is not silently
+    /// padded. For custom slippage / compute-budget, build the instructions
+    /// yourself with
     /// [`Self::build_buy_ixs`] and submit them through your own simulation
     /// or send path.
     pub async fn simulate_buy(
@@ -213,7 +337,12 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         keypair: &Keypair,
     ) -> Result<()> {
         let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
-        let base_amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, 0.01);
+        let fees = self
+            .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
+            .await?;
+        let (base, quote) = pool_info.effective_reserves(base_reserve, quote_reserve);
+        let base_amount_out =
+            quote_buy_exact_quote_in(amount_in, base, quote, fees, DEFAULT_SLIPPAGE).min_amount_out;
         debug!("Buy base amount out: {}", base_amount_out);
         let mut tx = Transaction::new_with_payer(
             &self.build_buy_ixs(
@@ -408,13 +537,19 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
 
     /// Submit a buy transaction (full send-and-confirm).
     ///
-    /// Convenience wrapper using **5% slippage**, **1,000,000 CU limit**, and
+    /// Convenience wrapper using [`DEFAULT_SLIPPAGE`] on a fee-aware quote,
+    /// **1,000,000 CU limit**, and
     /// **100,000 micro-lamport CU price**. For custom values, compose your
     /// own transaction from [`Self::build_buy_ixs`] plus your own
     /// `ComputeBudgetInstruction`s.
     pub async fn buy(&self, amount_in: u64, pool_info: &PoolInfo, payer: &Keypair) -> Result<()> {
         let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
-        let amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, 0.05);
+        let fees = self
+            .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
+            .await?;
+        let (base, quote) = pool_info.effective_reserves(base_reserve, quote_reserve);
+        let amount_out =
+            quote_buy_exact_quote_in(amount_in, base, quote, fees, DEFAULT_SLIPPAGE).min_amount_out;
         debug!("Buying amount out: {}", amount_out);
 
         let mut instructions: Vec<Instruction> = vec![
@@ -702,13 +837,18 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
 
     /// Submit a sell transaction (full send-and-confirm).
     ///
-    /// Convenience wrapper using **10% slippage**, **1,000,000 CU limit**, and
+    /// Convenience wrapper using [`DEFAULT_SLIPPAGE`] on a fee-aware quote,
+    /// **1,000,000 CU limit**, and
     /// **100,000 micro-lamport CU price**. For custom values, compose your
     /// own transaction from [`Self::build_sell_ixs`] plus your own
     /// `ComputeBudgetInstruction`s.
     pub async fn sell(&self, amount_in: u64, pool_info: &PoolInfo, payer: &Keypair) -> Result<()> {
         let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
-        let amount_out = calc_amount_out(amount_in, base_reserve, quote_reserve, 0.1);
+        let fees = self
+            .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
+            .await?;
+        let (base, quote) = pool_info.effective_reserves(base_reserve, quote_reserve);
+        let amount_out = quote_sell(amount_in, base, quote, fees, DEFAULT_SLIPPAGE).min_amount_out;
         debug!("Sell amount out: {}", amount_out);
 
         let mut instructions: Vec<Instruction> = vec![
@@ -1230,6 +1370,17 @@ pub async fn get_token_balance(
     }
 }
 
+/// Supply field of an SPL Token / Token-2022 mint account.
+///
+/// Both layouts share the same first 82 bytes, so the offset holds for
+/// Token-2022 mints with extensions appended.
+fn mint_supply(data: &[u8]) -> Result<u64> {
+    data.get(36..44)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| anyhow!("mint account too short: {} bytes", data.len()))
+}
+
 #[cfg(test)]
 mod orientation_tests {
     use super::*;
@@ -1255,6 +1406,7 @@ mod orientation_tests {
             coin_creator: Pubkey::new_unique(),
             is_mayhem_mode: false,
             is_cashback_coin: false,
+            virtual_quote_reserves: 0,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
         }

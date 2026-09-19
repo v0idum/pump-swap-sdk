@@ -55,7 +55,11 @@ pub use instruction::{
     make_sell_instruction, make_sync_user_volume_accumulator_instruction,
     transfer_creator_fees_to_pump_instruction, withdraw_instruction,
 };
-pub use math::{buy_amount_out, calc_amount_out, sell_amount_out};
+pub use math::{
+    BuyExactOutQuote, SwapQuote, buy_amount_out, calc_amount_out, can_quote_fees,
+    constant_product_out, is_tiered_fee_pool, market_cap_lamports, quote_buy_exact_base_out,
+    quote_buy_exact_quote_in, quote_sell, sell_amount_out, token_buy_quote, token_sell_quote,
+};
 pub use state::{FeeConfig, FeeTier, Fees, GlobalConfig, Pool, PoolInfo, TokenSide};
 pub use util::{
     JitoPool, calc_lp_mint_pda, calc_pool_pda, calc_pool_pda_with_index,

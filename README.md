@@ -132,21 +132,17 @@ account, optionally creates the user's token ATA, builds the pump-amm Buy
 instruction, and closes the WSOL account back to the payer.
 
 ```rust
-use pump_swap_sdk::buy_amount_out;
 use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::signature::Signer;
 
-let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
 let amount_in = sol_to_lamports(0.01);
-let base_amount_out = buy_amount_out(
-    amount_in,
-    (base_reserve, quote_reserve),
-    &pool_info,
-    0.01, // 1% slippage
-);
+// Subtracts the pool's live, market-cap-tiered fee before applying slippage,
+// so 0.1% here is a slippage budget and nothing else.
+let quote = client.quote_token_buy(amount_in, &pool_info, 0.001).await?;
+println!("fee {} lamports, expect {} tokens", quote.fee, quote.amount_out);
 
 let instructions = client.build_buy_ixs(
-    base_amount_out,
+    quote.min_amount_out,
     amount_in,
     true, // track_volume — count toward cashback accumulator
     &pool_info,
@@ -154,6 +150,11 @@ let instructions = client.build_buy_ixs(
     true, // create the user's token ATA if missing
 )?;
 ```
+
+> Quoting a swap as pure constant product is what makes the program reject
+> `min_out` with `ExceededSlippage` (`Custom(6004)`): pump-amm charges 30–125
+> bps depending on the pool's market cap, on top of the curve. `calc_amount_out`
+> is still there for the raw curve, but it does not price a real swap.
 
 ### Spend-exact-quote buys (`buy_exact_quote_in`)
 
@@ -183,25 +184,51 @@ account for quote output, builds the pump-amm Sell instruction, and closes the
 WSOL account after the swap.
 
 ```rust
-use pump_swap_sdk::sell_amount_out;
 use solana_sdk::signature::Signer;
 
-let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
 let base_amount_in = 1_000_000;
-let min_quote_amount_out = sell_amount_out(
-    base_amount_in,
-    (base_reserve, quote_reserve),
-    &pool_info,
-    0.01, // 1% slippage
-);
+let quote = client.quote_token_sell(base_amount_in, &pool_info, 0.001).await?;
 
 let instructions = client.build_sell_ixs(
     base_amount_in,
-    min_quote_amount_out,
+    quote.min_amount_out,
     &pool_info,
     &payer.pubkey(),
     false, // close the user's token ATA only when intentionally emptying it
 )?;
+```
+
+### How swaps are priced
+
+`quote_token_buy` / `quote_token_sell` reproduce pump-amm's own arithmetic, so
+`SwapQuote::amount_out` is what the program credits and `min_amount_out` is a
+floor it will accept. Three things the raw constant product misses:
+
+- **A market-cap-tiered fee.** On every swap pump-amm CPIs the fee program's
+  `GetFeesWithQuoteMint` with `(is_pump_pool, market_cap_lamports, quote_mint)`.
+  Pools carrying a `coin_creator` — pump.fun graduates — are priced off a
+  25-rung ladder running from 125 bps at the bottom to 30 bps at the top;
+  everything else pays the flat 30 bps schedule. `flat_fees` is **not** a
+  fallback for "no tier matched" — treating it as one under-charges a
+  low-market-cap pool by 95 bps. A ladder-priced pool quoted in something other
+  than SOL is priced by a rule this SDK has not established, so
+  `fetch_pool_fees` refuses it rather than guessing low; see `can_quote_fees`.
+- **Per-component rounding.** The lp, protocol and creator shares are each
+  rounded up separately, so the fee is up to two units more than one rounded-up
+  calculation on the combined rate.
+- **Virtual quote liquidity.** Pool accounts carry a `u64` past
+  `is_cashback_coin` that the published IDL does not list, and the program adds
+  it to the quote token-account balance both when stepping the curve and when
+  computing market cap. `PoolInfo::virtual_quote_reserves` exposes it and
+  `effective_reserves` applies it; a pool carrying it is mispriced by orders of
+  magnitude without it.
+
+Fee schedule and pricing rules are pinned by `tests/swap_math.rs`, which
+replays byte-for-byte mainnet swap events through this math offline. The
+`#[ignore]`d tests in that file re-check them against live chain state:
+
+```bash
+RPC_URL=https://my-private-rpc cargo test --test swap_math -- --ignored
 ```
 
 ### Customize transaction options
@@ -376,6 +403,8 @@ uses a keypair as capable of spending real funds.
 - This project is not an official Pump.fun product.
 - Simulate transactions before sending them.
 - Do not commit `.env` files, keypair JSON, or base58 secret keys.
+- The convenience helpers apply `DEFAULT_SLIPPAGE` (0.5%) on a fee-aware
+  quote. They used 1–10% only because the quote ignored the pool's fee.
 - Review default slippage, compute budget, and priority fee values before using
   the convenience `buy` / `sell` methods in production.
 

@@ -1,7 +1,13 @@
-//! Simulate the full trader round-trip — token buy then token sell — in one
-//! transaction via RPC `simulateTransaction` (sigVerify=false,
-//! replaceRecentBlockhash=true). Works on either pool orientation; the sell
-//! spends the tokens the buy just received, so no token balance is needed.
+//! Simulate the full trader round-trip — token buy, then token sell — via RPC
+//! `simulateTransaction` (sigVerify=false, replaceRecentBlockhash=true), one
+//! transaction per leg. Works on either pool orientation and needs no token
+//! balance: the sell leg is a layout check, not a fill.
+//!
+//! Both legs are priced with the fee-aware quotes
+//! ([`PumpSwapClient::quote_token_buy`] / `quote_token_sell`), which subtract
+//! the pool's live tiered fee, so the slippage below is a slippage budget and
+//! nothing more. The sell is quoted off pre-buy reserves and sells only 90% of
+//! the buy's floor.
 //!
 //! Run:
 //!   RPC_URL=https://api.mainnet-beta.solana.com \
@@ -21,7 +27,7 @@ use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 
-use pump_swap_sdk::{PumpSwapClient, calc_amount_out};
+use pump_swap_sdk::{PumpSwapClient, create_ata_token_or_not_with_program};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,25 +55,57 @@ async fn main() -> Result<()> {
     );
 
     let sol_in = sol_to_lamports(0.001);
-    // Expected tokens out with 20% slippage floor, then sell 90% of that floor
-    // (the actual fill is above the floor, so the sell amount is guaranteed held).
-    let min_tokens_out = calc_amount_out(sol_in, sol_reserve, token_reserve, 0.2);
+    // 0.1% slippage is a real slippage budget now that the quote subtracts the
+    // pool's fee; before it was fee-blind, this had to be 20% to pass.
+    let quote = client.quote_token_buy(sol_in, &pool_info, 0.001).await?;
+    let min_tokens_out = quote.min_amount_out;
     let tokens_to_sell = min_tokens_out * 9 / 10;
-    println!("sol_in={sol_in} min_tokens_out={min_tokens_out} tokens_to_sell={tokens_to_sell}");
+    println!(
+        "sol_in={sol_in} fee={} expected_out={} min_tokens_out={min_tokens_out} tokens_to_sell={tokens_to_sell}",
+        quote.fee, quote.amount_out,
+    );
 
     let buy_ixs =
         client.build_token_buy_ixs(sol_in, min_tokens_out, true, &pool_info, &user_pubkey, true)?;
+
+    // Sell the tokens the buy just received, in the same transaction: the buy
+    // creates the token ATA and funds it, so the sell leg exercises the real
+    // account layout instead of tripping over a missing account.
+    let sell_quote = client
+        .quote_token_sell(tokens_to_sell, &pool_info, 0.001)
+        .await?;
+    println!(
+        "tokens_to_sell={tokens_to_sell} fee={} expected_sol_out={} min_sol_out={}",
+        sell_quote.fee, sell_quote.amount_out, sell_quote.min_amount_out,
+    );
+    let sell_ixs = client.build_token_sell_ixs(
+        tokens_to_sell,
+        sell_quote.min_amount_out,
+        &pool_info,
+        &user_pubkey,
+        false,
+    )?;
+
+    // Both legs together overflow a legacy transaction, so they are simulated
+    // separately. The sell therefore runs against a wallet that holds none of
+    // the token: with the ATA created up front, a clean account layout shows
+    // up as an insufficient-funds failure *inside* the token transfer. Any
+    // earlier, account-related error would mean a layout bug.
     simulate("TOKEN BUY", &rpc, buy_ixs, &user_pubkey).await?;
 
-    // Sell sim: the wallet holds no tokens, so a clean layout pass surfaces as
-    // an insufficient-funds failure INSIDE the token transfer (all accounts
-    // already validated) — anything account-related earlier means layout bug.
-    let sell_ixs =
-        client.build_token_sell_ixs(tokens_to_sell, 1, &pool_info, &user_pubkey, false)?;
+    let (_, create_token_ata) = create_ata_token_or_not_with_program(
+        &user_pubkey,
+        &pool_info.token_mint(),
+        &user_pubkey,
+        &pool_info.token_program(),
+        true,
+    );
+    let mut sell_leg = create_token_ata.into_iter().collect::<Vec<_>>();
+    sell_leg.extend(sell_ixs);
     simulate(
         "TOKEN SELL (expect insufficient-funds, NOT account errors)",
         &rpc,
-        sell_ixs,
+        sell_leg,
         &user_pubkey,
     )
     .await?;

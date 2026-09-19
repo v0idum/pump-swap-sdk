@@ -107,19 +107,19 @@ pub async fn load_pool_with_token_program(
     token_program: Option<Pubkey>,
 ) -> Result<PoolInfo> {
     let data = rpc.get_account_data(pool_pubkey).await?;
-    let pool_size = size_of::<Pool>();
-    if data.len() < pool_size + 8 {
-        anyhow::bail!(
-            "Data size mismatch: expected at least {}, got {}",
-            pool_size + 8,
-            data.len()
-        );
-    }
-    let pool_data = *from_bytes::<Pool>(&data[8..pool_size + 8]);
 
     let (base_token_program, quote_token_program) = match token_program {
         Some(p) => (p, p),
         None => {
+            let pool_size = size_of::<Pool>();
+            if data.len() < pool_size + 8 {
+                anyhow::bail!(
+                    "Data size mismatch: expected at least {}, got {}",
+                    pool_size + 8,
+                    data.len()
+                );
+            }
+            let pool_data = *from_bytes::<Pool>(&data[8..pool_size + 8]);
             let mint_accounts = rpc
                 .get_multiple_accounts(&[pool_data.base_mint, pool_data.quote_mint])
                 .await?;
@@ -135,21 +135,7 @@ pub async fn load_pool_with_token_program(
         }
     };
 
-    Ok(PoolInfo {
-        pool: *pool_pubkey,
-        pool_account_data_len: data.len(),
-        base_mint: pool_data.base_mint,
-        quote_mint: pool_data.quote_mint,
-        lp_mint: pool_data.lp_mint,
-        pool_base_token_account: pool_data.pool_base_token_account,
-        pool_quote_token_account: pool_data.pool_quote_token_account,
-        creator: pool_data.creator,
-        coin_creator: pool_data.coin_creator,
-        is_mayhem_mode: pool_data.is_mayhem_mode != 0,
-        is_cashback_coin: pool_data.is_cashback_coin != 0,
-        base_token_program,
-        quote_token_program,
-    })
+    PoolInfo::from_account_data(*pool_pubkey, &data, base_token_program, quote_token_program)
 }
 
 /// Returns the classic SPL Token associated token account for `(owner,

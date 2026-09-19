@@ -897,6 +897,7 @@ mod tests {
             coin_creator,
             is_mayhem_mode: false,
             is_cashback_coin,
+            virtual_quote_reserves: 0,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
         }
