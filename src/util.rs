@@ -351,6 +351,17 @@ pub fn fee_config_pda() -> Pubkey {
     .0
 }
 
+/// PDA: `["sharing-config", mint]` under the [`FEE_PROGRAM`].
+///
+/// Address of the coin's [`SharingConfig`](crate::state::SharingConfig).
+/// Note the seed is hyphenated, unlike `fee_config`'s underscore.
+///
+/// The account only exists for coins whose creator fees have been split; for
+/// everything else the derived address is empty.
+pub fn sharing_config_pda(mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"sharing-config", mint.as_ref()], &FEE_PROGRAM).0
+}
+
 /// PDA: `["pool-v2", base_mint]` under pump-amm. Required as a remaining
 /// account on Buy/Sell when `pool.coin_creator != Pubkey::default()`.
 pub fn pool_v2_pda(base_mint: &Pubkey) -> Pubkey {

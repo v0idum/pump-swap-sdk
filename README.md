@@ -400,10 +400,16 @@ cargo doc --open
   `fetch_global_volume_accumulator` reads the program-wide account. Note that
   `cashback_earned` and `total_cashback_claimed` are independent counters and
   do not subtract into a claimable balance — see the type docs.
+- `SharingConfig`, `Shareholder`, `ConfigStatus`: a coin's creator-fee split,
+  owned by the fee program at `sharing_config_pda(mint)`
+  (`["sharing-config", mint]`). `SharingConfig::from_account_data` decodes raw
+  bytes; `PumpSwapClient::fetch_sharing_config` fetches one, returning
+  `Ok(None)` for a coin with no split. Decoding only — the fee-collection
+  builders do not yet route through a split.
 - `calc_amount_out`, `buy_amount_out`, `sell_amount_out`: quote math helpers.
 - PDA helpers such as `calc_pool_pda`, `calc_lp_mint_pda`,
   `find_coin_creator_vault_authority`, `find_coin_creator_vault_ata`,
-  `find_user_vol_accumulator`, and `fee_config_pda`.
+  `find_user_vol_accumulator`, `fee_config_pda`, and `sharing_config_pda`.
 - `JitoPool`, `send_jito_bundle`, `send_bundle_with_retry`: Jito bundle
   helpers.
 

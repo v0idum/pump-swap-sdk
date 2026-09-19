@@ -38,6 +38,34 @@
   from a real `claim_cashback` transaction; the global fixture records the
   zeroed account as it stands, and the `#[ignore]`d tests are the alarm for
   the day that changes.
+- **`SharingConfig` decoding: a coin's creator fees split across several
+  addresses by basis points.** New `SharingConfig`, `Shareholder` and
+  `ConfigStatus` types with a `SharingConfig::from_account_data` decoder,
+  `util::sharing_config_pda` for the address, and
+  `PumpSwapClient::fetch_sharing_config`, which returns `Ok(None)` for the
+  common case of a coin with no split.
+
+  The account is owned by the fee program, not pump-amm, and lives at
+  `["sharing-config", mint]` under it — note the hyphen, where `fee_config`
+  uses an underscore. pump-amm declares it in its own IDL because
+  `migrate_pool_coin_creator` reads it: that instruction takes the pool and
+  this config as its only non-fixed accounts and repoints the pool's
+  `coin_creator` at the config, which is also what the pump-amm error set
+  describes (`CoinCreatorMigratedToSharingConfig`,
+  `CreatorVaultMigratedToSharingConfig`). 664_802 of these accounts were live
+  on mainnet at slot 448_520_505 (2026-09-20), across both `ConfigStatus`
+  variants.
+
+  The account is allocated at a fixed 1024 bytes and a shrunk shareholder list
+  leaves its old bytes in place, so the decoder stops at the end of the
+  `shareholders` vector and ignores the remainder. Covered by two byte-for-byte
+  mainnet fixtures under `tests/fixtures/sharing_configs/` — a four-way active
+  split and a paused config with a revoked admin and stale trailing bytes —
+  plus `#[ignore]`d tests against live chain state.
+
+  This release decodes the account only; routing creator fees through a split
+  when `pool.coin_creator` is a `SharingConfig` PDA is not yet wired into the
+  fee-collection builders.
 
 ### Changed
 

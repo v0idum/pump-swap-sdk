@@ -190,6 +190,8 @@ const USER_VOLUME_ACCUMULATOR_DISCRIMINATOR: [u8; 8] =
 /// Anchor account discriminator for pump-amm's `GlobalVolumeAccumulator`.
 const GLOBAL_VOLUME_ACCUMULATOR_DISCRIMINATOR: [u8; 8] =
     [0xca, 0x2a, 0xf6, 0x2b, 0x8e, 0xbe, 0x1e, 0xff];
+/// Anchor account discriminator for the fee program's `SharingConfig`.
+const SHARING_CONFIG_DISCRIMINATOR: [u8; 8] = [0xd8, 0x4a, 0x09, 0x00, 0x38, 0x8c, 0x5d, 0x4b];
 
 /// Sequential borsh reader over raw account bytes.
 ///
@@ -232,6 +234,10 @@ impl<'a> Reader<'a> {
 
     fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into()?))
     }
 
     fn bool(&mut self) -> Result<bool> {
@@ -736,5 +742,115 @@ impl GlobalVolumeAccumulator {
         usize::try_from(day)
             .ok()
             .filter(|day| *day < VOLUME_ACCUMULATOR_DAYS)
+    }
+}
+
+/// Whether a [`SharingConfig`] is currently paying out.
+///
+/// Borsh-encoded as a single byte holding the variant index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ConfigStatus {
+    Paused,
+    Active,
+}
+
+impl ConfigStatus {
+    fn read(reader: &mut Reader<'_>) -> Result<Self> {
+        match reader.u8()? {
+            0 => Ok(Self::Paused),
+            1 => Ok(Self::Active),
+            other => Err(anyhow!("invalid ConfigStatus variant {other}")),
+        }
+    }
+}
+
+/// One payee of a coin's creator fees, and the share it receives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Shareholder {
+    pub address: Pubkey,
+    /// Share of the coin's creator fees, in basis points of 10_000.
+    pub share_bps: u16,
+}
+
+impl Shareholder {
+    fn read(reader: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
+            address: reader.pubkey()?,
+            share_bps: reader.u16()?,
+        })
+    }
+
+    /// Encoded size of a `Shareholder` (32-byte pubkey + `u16`).
+    const ENCODED_LEN: usize = 32 + 2;
+}
+
+/// The fee program's `SharingConfig` account: a coin's creator fees split
+/// across several addresses by basis points.
+///
+/// Owned by [`FEE_PROGRAM`](crate::constants::FEE_PROGRAM), **not** by
+/// pump-amm, and stored at
+/// [`sharing_config_pda`](crate::util::sharing_config_pda) — the PDA
+/// `["sharing-config", mint]` under the fee program. pump-amm declares the
+/// account in its own IDL because `migrate_pool_coin_creator` reads it: that
+/// instruction takes exactly two non-fixed accounts, the pool and this config,
+/// and points the pool's `coin_creator` at the config so subsequent creator
+/// fees route through the split instead of to a single creator. The pump-amm
+/// error set names the same flow (`CoinCreatorMigratedToSharingConfig`,
+/// `CreatorVaultMigratedToSharingConfig`).
+///
+/// 664_802 of these existed on mainnet at slot 448_520_505 (2026-09-20), so
+/// the type is live rather than declared-but-unwired.
+///
+/// The account is allocated at 1024 bytes regardless of how many shareholders
+/// it holds, and a config whose list has shrunk keeps the old entries' bytes
+/// past the encoded length. [`Self::from_account_data`] stops at the end of
+/// the `shareholders` vector and ignores the remainder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SharingConfig {
+    pub bump: u8,
+    pub version: u8,
+    pub status: ConfigStatus,
+    /// The coin whose creator fees this config splits.
+    pub mint: Pubkey,
+    /// Authority allowed to edit the split. Equal to
+    /// [`Pubkey::default()`] once `admin_revoked` is set.
+    pub admin: Pubkey,
+    pub admin_revoked: bool,
+    pub shareholders: Vec<Shareholder>,
+}
+
+impl SharingConfig {
+    /// Decode a `SharingConfig` from raw account data, discriminator included.
+    ///
+    /// Trailing bytes past the encoded layout are ignored; see the type-level
+    /// note on the fixed 1024-byte allocation.
+    pub fn from_account_data(data: &[u8]) -> Result<Self> {
+        let mut reader =
+            Reader::after_discriminator(data, &SHARING_CONFIG_DISCRIMINATOR, "SharingConfig")?;
+        Ok(Self {
+            bump: reader.u8()?,
+            version: reader.u8()?,
+            status: ConfigStatus::read(&mut reader)?,
+            mint: reader.pubkey()?,
+            admin: reader.pubkey()?,
+            admin_revoked: reader.bool()?,
+            shareholders: reader.vec(Shareholder::ENCODED_LEN, Shareholder::read)?,
+        })
+    }
+
+    /// True when the config is paying out.
+    pub fn is_active(&self) -> bool {
+        self.status == ConfigStatus::Active
+    }
+
+    /// Sum of every shareholder's `share_bps`.
+    ///
+    /// 10_000 on every live config observed with at least one shareholder; a
+    /// paused config can have an empty list, which sums to zero.
+    pub fn total_share_bps(&self) -> u32 {
+        self.shareholders
+            .iter()
+            .map(|s| u32::from(s.share_bps))
+            .sum()
     }
 }
