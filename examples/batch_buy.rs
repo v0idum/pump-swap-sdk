@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::compute_budget::ComputeBudgetInstruction;
+use solana_commitment_config::CommitmentConfig;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::Transaction;
@@ -107,7 +107,7 @@ fn parse_keypairs(csv: &str) -> Result<Vec<Keypair>> {
             let bytes = solana_sdk::bs58::decode(s)
                 .into_vec()
                 .context("base58 decode")?;
-            Keypair::from_bytes(&bytes).map_err(|e| anyhow!("keypair: {e}"))
+            Keypair::try_from(&bytes[..]).map_err(|e| anyhow!("keypair: {e}"))
         })
         .collect()
 }

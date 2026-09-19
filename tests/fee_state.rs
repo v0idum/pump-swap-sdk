@@ -189,7 +189,7 @@ mod live {
     use super::*;
     use pump_swap_sdk::PumpSwapClient;
     use solana_client::nonblocking::rpc_client::RpcClient;
-    use solana_sdk::commitment_config::CommitmentConfig;
+    use solana_commitment_config::CommitmentConfig;
     use std::sync::Arc;
 
     fn client() -> PumpSwapClient<Arc<RpcClient>> {

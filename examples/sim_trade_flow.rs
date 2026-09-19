@@ -21,9 +21,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
-use solana_sdk::commitment_config::CommitmentConfig;
+use solana_commitment_config::CommitmentConfig;
+use solana_native_token::LAMPORTS_PER_SOL;
 use solana_sdk::message::Message;
-use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
         token_reserve,
     );
 
-    let sol_in = sol_to_lamports(0.001);
+    let sol_in = LAMPORTS_PER_SOL / 1_000; // 0.001 SOL
     // 0.1% slippage is a real slippage budget now that the quote subtracts the
     // pool's fee; before it was fee-blind, this had to be 20% to pass.
     let quote = client.quote_token_buy(sol_in, &pool_info, 0.001).await?;
