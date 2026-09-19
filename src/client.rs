@@ -15,10 +15,13 @@ use crate::math::{
     SwapQuote, can_quote_fees, is_tiered_fee_pool, market_cap_lamports, quote_buy_exact_quote_in,
     quote_sell, token_buy_quote, token_sell_quote,
 };
-use crate::state::{FeeConfig, Fees, GlobalConfig, PoolInfo};
+use crate::state::{
+    FeeConfig, Fees, GlobalConfig, GlobalVolumeAccumulator, PoolInfo, UserVolumeAccumulator,
+};
 use crate::util::{
     calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
-    create_ata_token_or_not_with_program, fee_config_pda, gen_pubkey_with_seed, load_pool,
+    create_ata_token_or_not_with_program, fee_config_pda, find_user_vol_accumulator,
+    gen_pubkey_with_seed, load_pool,
 };
 use anyhow::{Result, anyhow};
 use log::{debug, info};
@@ -80,6 +83,65 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     pub async fn fetch_fee_config(&self) -> Result<FeeConfig> {
         let data = self.rpc.get_account_data(&fee_config_pda()).await?;
         FeeConfig::from_account_data(&data)
+    }
+
+    /// Fetch and decode pump-amm's [`GlobalVolumeAccumulator`] from
+    /// [`GLOBAL_VOLUME_ACCUMULATOR`].
+    ///
+    /// The live account is zeroed — the token-incentive program is dormant —
+    /// so expect empty buckets rather than reading a zero result as a
+    /// decoding failure. See [`GlobalVolumeAccumulator`].
+    pub async fn fetch_global_volume_accumulator(&self) -> Result<GlobalVolumeAccumulator> {
+        let data = self
+            .rpc
+            .get_account_data(&GLOBAL_VOLUME_ACCUMULATOR)
+            .await?;
+        GlobalVolumeAccumulator::from_account_data(&data)
+    }
+
+    /// Fetch and decode `user`'s [`UserVolumeAccumulator`], the PDA at
+    /// [`find_user_vol_accumulator`].
+    ///
+    /// Returns `Ok(None)` when the PDA does not exist: a user who has never
+    /// traded has no accumulator, and one that has been closed through
+    /// `close_user_volume_accumulator` no longer has one. That is an ordinary
+    /// state, not an error — use
+    /// [`UserVolumeAccumulator::empty`] to treat it as all-zero counters.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use solana_client::nonblocking::rpc_client::RpcClient;
+    /// # use solana_sdk::pubkey::Pubkey;
+    /// # use pump_swap_sdk::PumpSwapClient;
+    /// # async fn run(rpc: Arc<RpcClient>, user: Pubkey) -> anyhow::Result<()> {
+    /// let client = PumpSwapClient::new(rpc);
+    /// match client.fetch_user_volume_accumulator(&user).await? {
+    ///     Some(accumulator) => println!(
+    ///         "cashback earned {} lamports, {} claimed",
+    ///         accumulator.cashback_earned, accumulator.total_cashback_claimed,
+    ///     ),
+    ///     None => println!("no accumulator yet - this user has never traded"),
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn fetch_user_volume_accumulator(
+        &self,
+        user: &Pubkey,
+    ) -> Result<Option<UserVolumeAccumulator>> {
+        let pda = find_user_vol_accumulator(user);
+        let account = self
+            .rpc
+            .get_multiple_accounts(&[pda])
+            .await?
+            .into_iter()
+            .next()
+            .flatten();
+
+        account
+            .map(|account| UserVolumeAccumulator::from_account_data(&account.data))
+            .transpose()
     }
 
     /// Fetch both fee-bearing config accounts in a single
