@@ -25,3 +25,45 @@ jobs:
       - run: cargo test --doc
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
       - run: cargo build --all-targets
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Read the MSRV from Cargo.toml rather than hardcoding it here, so the
+      # declared `rust-version` and the toolchain it is verified against
+      # cannot drift apart.
+      - id: msrv
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -er '.packages[0].rust_version')"
+          echo "Cargo.toml declares rust-version = $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ steps.msrv.outputs.version }}
+      - run: cargo build --all-targets --locked
+      - run: cargo test --all-targets --locked
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # RUSTSEC-2026-0258 (h2 0.3.26, unbounded empty DATA frames) is ignored.
+      # It is patched in h2 0.4.16, reachable only through
+      # jito-sdk-rust 0.3.2 -> reqwest 0.11.27 -> hyper 0.14 -> h2 0.3, so it
+      # cannot be resolved from this repo without jito-sdk-rust moving to
+      # reqwest 0.12. The advisory describes unbounded queueing of empty DATA
+      # frames on an HTTP/2 endpoint accepting inbound connections; this SDK
+      # only uses reqwest as a client to POST Jito bundles, and serves nothing.
+      # Drop this flag as soon as jito-sdk-rust ships a reqwest 0.12 release.
+      - run: cargo audit --ignore RUSTSEC-2026-0258

@@ -1399,7 +1399,9 @@ mod orientation_tests {
         };
         PoolInfo {
             pool: Pubkey::new_unique(),
-            pool_account_data_len: 300,
+            // Current-layout pool: no `extend_account` is prepended, so the
+            // sole pump-amm instruction in each built sequence is the swap.
+            pool_account_data_len: POOL_ACCOUNT_NEW_SIZE,
             base_mint,
             quote_mint,
             lp_mint: Pubkey::new_unique(),
@@ -1566,5 +1568,129 @@ mod orientation_tests {
                 .unwrap();
             assert_eq!(funding(&ixs), rent, "sell sol_base={sol_base}");
         }
+    }
+}
+
+/// The `extend_account` gate: which pool accounts get an `extend_account`
+/// instruction prepended, and which are already at the current layout.
+///
+/// [`POOL_ACCOUNT_NEW_SIZE`] is the current 301-byte live allocation and
+/// [`PumpSwapClient::maybe_extend_pool_ix`] compares against it with `<`, so
+/// the decision flips between a 300-byte account (extend) and a 301-byte one
+/// (leave alone). While the constant read 300 a pool at exactly 300 bytes was
+/// misclassified as current; these tests pin both sides of the boundary.
+#[cfg(test)]
+mod extend_account_gate_tests {
+    use super::*;
+    use crate::state::PoolInfo;
+
+    /// Real mainnet pool accounts: a legacy short one and a current-layout one.
+    const POOL_LEGACY_SHORT: &[u8] =
+        include_bytes!("../tests/fixtures/pools/pool_legacy_short.bin");
+    const POOL_CURRENT: &[u8] =
+        include_bytes!("../tests/fixtures/pools/pool_sol_base_flat_fee.bin");
+
+    /// Anchor discriminator of pump-amm's `extend_account`.
+    const EXTEND_ACCOUNT_DISCRIMINATOR: [u8; 8] = [234, 102, 194, 203, 150, 72, 62, 229];
+
+    fn pool_info_with_len(pool: Pubkey, len: usize) -> PoolInfo {
+        PoolInfo {
+            pool,
+            pool_account_data_len: len,
+            base_mint: WRAPPED_SOL_MINT,
+            quote_mint: Pubkey::new_unique(),
+            lp_mint: Pubkey::new_unique(),
+            pool_base_token_account: Pubkey::new_unique(),
+            pool_quote_token_account: Pubkey::new_unique(),
+            creator: Pubkey::new_unique(),
+            coin_creator: Pubkey::new_unique(),
+            is_mayhem_mode: false,
+            is_cashback_coin: false,
+            virtual_quote_reserves: 0,
+            base_token_program: spl_token::ID,
+            quote_token_program: spl_token::ID,
+        }
+    }
+
+    fn gate(len: usize, payer: &Pubkey, pool: &Pubkey) -> Option<Instruction> {
+        PumpSwapClient::<std::sync::Arc<RpcClient>>::maybe_extend_pool_ix(
+            &pool_info_with_len(*pool, len),
+            payer,
+        )
+        .expect("gate never fails for a well-formed pool")
+    }
+
+    /// One byte below the boundary extends; exactly at it does not. 300 is the
+    /// case the old constant got wrong.
+    #[test]
+    fn gate_flips_between_300_and_301_bytes() {
+        let payer = Pubkey::new_unique();
+        let pool = Pubkey::new_unique();
+
+        assert_eq!(POOL_ACCOUNT_NEW_SIZE, 301, "boundary moved");
+
+        let below = gate(POOL_ACCOUNT_NEW_SIZE - 1, &payer, &pool)
+            .expect("300-byte pool predates the current layout and must be extended");
+        assert_eq!(below.program_id, PUMP_SWAP_PROGRAM_ID);
+        assert_eq!(below.data, EXTEND_ACCOUNT_DISCRIMINATOR);
+        assert_eq!(below.accounts[0].pubkey, pool, "extends the pool account");
+        assert_eq!(below.accounts[1].pubkey, payer, "payer signs");
+
+        assert!(
+            gate(POOL_ACCOUNT_NEW_SIZE, &payer, &pool).is_none(),
+            "301-byte pool is already at the current layout"
+        );
+    }
+
+    /// The gate is monotonic across the boundary, not just correct at it.
+    #[test]
+    fn gate_extends_everything_shorter_and_nothing_longer() {
+        let payer = Pubkey::new_unique();
+        let pool = Pubkey::new_unique();
+
+        for len in [0, 245, 271, 299, 300] {
+            assert!(
+                gate(len, &payer, &pool).is_some(),
+                "{len} bytes must extend"
+            );
+        }
+        for len in [301, 302, 400] {
+            assert!(
+                gate(len, &payer, &pool).is_none(),
+                "{len} bytes must not extend"
+            );
+        }
+    }
+
+    /// The boundary against real bytes: the constant is only correct if a live
+    /// current-layout account lands on the non-extending side of it.
+    #[test]
+    fn gate_matches_real_pool_fixtures() {
+        let payer = Pubkey::new_unique();
+        let decode = |data: &[u8]| {
+            PoolInfo::from_account_data(Pubkey::new_unique(), data, spl_token::ID, spl_token::ID)
+                .expect("fixture decodes")
+        };
+
+        let legacy = decode(POOL_LEGACY_SHORT);
+        assert_eq!(legacy.pool_account_data_len, 271);
+        assert!(
+            PumpSwapClient::<std::sync::Arc<RpcClient>>::maybe_extend_pool_ix(&legacy, &payer)
+                .unwrap()
+                .is_some(),
+            "legacy 271-byte pool must be extended"
+        );
+
+        let current = decode(POOL_CURRENT);
+        assert_eq!(
+            current.pool_account_data_len, POOL_ACCOUNT_NEW_SIZE,
+            "live pool accounts are 301 bytes"
+        );
+        assert!(
+            PumpSwapClient::<std::sync::Arc<RpcClient>>::maybe_extend_pool_ix(&current, &payer)
+                .unwrap()
+                .is_none(),
+            "current-layout pool must not be extended"
+        );
     }
 }

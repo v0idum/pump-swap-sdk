@@ -25,9 +25,19 @@ pub const EVENT_AUTHORITY: Pubkey = pubkey!("GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ6
 /// pump-amm GlobalConfig account.
 pub const GLOBAL_CONFIG: Pubkey = pubkey!("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw");
 
-/// Current pool-account allocation size used by the official SDK before it
-/// prepends `extend_account` for older pools.
-pub const POOL_ACCOUNT_NEW_SIZE: usize = 300;
+/// Size in bytes of a current pool account, Anchor discriminator included.
+///
+/// Live mainnet pools allocate 301 bytes: an 8-byte discriminator, the
+/// 237-byte [`Pool`](crate::Pool) struct, the 8-byte undocumented
+/// `virtual_quote_reserves` that follows it, and trailing reserved space.
+/// Pools allocated before the layout was extended are shorter — the
+/// `pool_legacy_short.bin` fixture is a real 271-byte one — and the
+/// high-level build helpers prepend `extend_account` for them.
+///
+/// This is a threshold, not a decode bound:
+/// [`PoolInfo::from_account_data`](crate::PoolInfo::from_account_data) reads
+/// fields at fixed offsets and accepts accounts on either side of it.
+pub const POOL_ACCOUNT_NEW_SIZE: usize = 301;
 
 /// Global volume accumulator account (PDA `["global_volume_accumulator"]` under
 /// pump-amm; address is stable, pinned as a constant for convenience).
