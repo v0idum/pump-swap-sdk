@@ -1,5 +1,6 @@
 use crate::constants::{
-    GLOBAL_VOLUME_ACCUMULATOR, POOL_ACCOUNT_NEW_SIZE, PUMP_SWAP_PROGRAM_ID, WRAPPED_SOL_MINT,
+    GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR, POOL_ACCOUNT_NEW_SIZE, PUMP_SWAP_PROGRAM_ID,
+    WRAPPED_SOL_MINT,
 };
 use crate::instruction::{
     create_pool_instruction_with_options, distribute_creator_fees_instruction,
@@ -11,10 +12,10 @@ use crate::instruction::{
     transfer_creator_fees_to_pump_instruction, withdraw_instruction,
 };
 use crate::math::calc_amount_out;
-use crate::state::PoolInfo;
+use crate::state::{FeeConfig, GlobalConfig, PoolInfo};
 use crate::util::{
     calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
-    create_ata_token_or_not_with_program, gen_pubkey_with_seed, load_pool,
+    create_ata_token_or_not_with_program, fee_config_pda, gen_pubkey_with_seed, load_pool,
 };
 use anyhow::{Result, anyhow};
 use log::{debug, info};
@@ -56,6 +57,72 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// base/quote token programs by reading each mint account's owner).
     pub async fn load_pool(&self, pool_pubkey: &Pubkey) -> Result<PoolInfo> {
         load_pool(pool_pubkey, &self.rpc).await
+    }
+
+    /// Fetch and decode pump-amm's [`GlobalConfig`] account.
+    pub async fn fetch_global_config(&self) -> Result<GlobalConfig> {
+        let data = self.rpc.get_account_data(&GLOBAL_CONFIG).await?;
+        GlobalConfig::from_account_data(&data)
+    }
+
+    /// Fetch and decode the fee program's [`FeeConfig`] account from
+    /// [`fee_config_pda`].
+    pub async fn fetch_fee_config(&self) -> Result<FeeConfig> {
+        let data = self.rpc.get_account_data(&fee_config_pda()).await?;
+        FeeConfig::from_account_data(&data)
+    }
+
+    /// Fetch both fee-bearing config accounts in a single
+    /// `getMultipleAccounts` call, returning `(global_config, fee_config)`.
+    ///
+    /// Prefer this over calling [`PumpSwapClient::fetch_global_config`] and
+    /// [`PumpSwapClient::fetch_fee_config`] back to back: pricing a swap needs
+    /// both, and public RPC endpoints rate-limit aggressively.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use solana_client::nonblocking::rpc_client::RpcClient;
+    /// # use pump_swap_sdk::PumpSwapClient;
+    /// # async fn run(rpc: Arc<RpcClient>) -> anyhow::Result<()> {
+    /// let client = PumpSwapClient::new(rpc);
+    /// let (global_config, fee_config) = client.fetch_fee_state().await?;
+    ///
+    /// // Total fee charged on a standard pool at a given market cap. Pools
+    /// // below every tier threshold fall back to the flat fee schedule.
+    /// let market_cap_lamports = 5_000_000_000_000u128;
+    /// let total_bps = fee_config
+    ///     .fee_tier_for_market_cap(market_cap_lamports)
+    ///     .map(|tier| tier.fees.total_bps())
+    ///     .unwrap_or_else(|| fee_config.flat_fees.total_bps());
+    ///
+    /// println!(
+    ///     "total {total_bps} bps, coin creator {} bps",
+    ///     global_config.coin_creator_fee_basis_points,
+    /// );
+    /// # Ok(()) }
+    /// ```
+    pub async fn fetch_fee_state(&self) -> Result<(GlobalConfig, FeeConfig)> {
+        let fee_config_key = fee_config_pda();
+        let accounts = self
+            .rpc
+            .get_multiple_accounts(&[GLOBAL_CONFIG, fee_config_key])
+            .await?;
+
+        let global_config = accounts
+            .first()
+            .and_then(|a| a.as_ref())
+            .ok_or_else(|| anyhow!("GlobalConfig account {GLOBAL_CONFIG} not found"))?;
+        let fee_config = accounts
+            .get(1)
+            .and_then(|a| a.as_ref())
+            .ok_or_else(|| anyhow!("FeeConfig account {fee_config_key} not found"))?;
+
+        Ok((
+            GlobalConfig::from_account_data(&global_config.data)?,
+            FeeConfig::from_account_data(&fee_config.data)?,
+        ))
     }
 
     /// Fetch raw base/quote reserves (in token base units) for a pool.

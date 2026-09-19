@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `GlobalConfig`, `FeeConfig`, `Fees`, and `FeeTier` types with deserializers
+  matching the live pump-amm and fee-program IDLs (verified on mainnet
+  2026-09-19). `GlobalConfig` mirrors the on-chain one
+  `reserved_fee_recipient` plus seven `reserved_fee_recipients` split, with
+  `all_reserved_fee_recipients()` for the flattened view used by
+  `RESERVED_FEE_RECIPIENTS`. `FeeTier::market_cap_lamports_threshold` is a
+  `u128`, as on chain.
+- `PumpSwapClient::fetch_global_config`, `fetch_fee_config`, and
+  `fetch_fee_state` (both accounts in one `getMultipleAccounts` call).
+- `FeeConfig::fee_tier_for_market_cap` / `stable_fee_tier_for_market_cap` and
+  `Fees::total_bps()`, so callers can price a swap's fee without a CPI to the
+  fee program's `get_fees`.
+- `tests/fee_state.rs` with mainnet account fixtures for offline layout
+  assertions, plus `#[ignore]`d live tests that act as a drift alarm for the
+  hardcoded fee-recipient tables in `constants.rs`.
+
 ## 0.4.0 - 2026-07-11
 
 ### Fixed

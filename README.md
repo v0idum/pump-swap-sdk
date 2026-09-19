@@ -31,6 +31,9 @@ the protocol supports.
   fee recipient selection, `extend_account`, user volume accumulators, token
   incentives, and direct coin-creator fee collection.
 - Reserve-aware buy/sell quote helpers.
+- Live fee-state decoding: pump-amm `GlobalConfig` and the fee program's
+  `FeeConfig` (flat fees plus the standard and stable market-cap fee
+  ladders), fetched in one RPC call.
 - High-level `PumpSwapClient` for loading pools, simulating swaps,
   building transaction instruction sets, and submitting convenience
   buys/sells.
@@ -350,6 +353,13 @@ cargo doc --open
   `distribute_creator_fees_instruction`: additional pump-amm and pump.fun
   instruction builders.
 - `load_pool`, `load_pool_with_token_program`: pool account decoding helpers.
+- `GlobalConfig`, `FeeConfig`, `Fees`, `FeeTier`: decoded on-chain fee state.
+  `GlobalConfig::from_account_data` and `FeeConfig::from_account_data` decode
+  raw account bytes; `PumpSwapClient::fetch_global_config`,
+  `fetch_fee_config`, and `fetch_fee_state` fetch and decode them.
+  `FeeConfig::fee_tier_for_market_cap` (and its `stable_` counterpart) picks
+  the applicable tier, and `Fees::total_bps()` sums the lp/protocol/creator
+  split.
 - `calc_amount_out`, `buy_amount_out`, `sell_amount_out`: quote math helpers.
 - PDA helpers such as `calc_pool_pda`, `calc_lp_mint_pda`,
   `find_coin_creator_vault_authority`, `find_coin_creator_vault_ata`,
@@ -382,6 +392,19 @@ cargo test --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo package
 ```
+
+Tests that hit mainnet RPC are `#[ignore]`d so CI never depends on RPC
+availability. Run them explicitly — against a private endpoint when iterating,
+since `api.mainnet-beta.solana.com` rate-limits to HTTP 429 quickly:
+
+```sh
+RPC_URL=https://my-private-rpc cargo test -- --ignored
+```
+
+`tests/fee_state.rs` keeps byte-for-byte mainnet fixtures of `GlobalConfig` and
+`FeeConfig` under `tests/fixtures/`, so the layout assertions run offline. Its
+`#[ignore]`d live tests re-run them against chain state and double as a drift
+alarm for the hardcoded fee-recipient tables in `constants.rs`.
 
 ## License
 
