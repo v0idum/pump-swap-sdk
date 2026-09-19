@@ -16,12 +16,13 @@ use crate::math::{
     quote_sell, token_buy_quote, token_sell_quote,
 };
 use crate::state::{
-    FeeConfig, Fees, GlobalConfig, GlobalVolumeAccumulator, PoolInfo, UserVolumeAccumulator,
+    FeeConfig, Fees, GlobalConfig, GlobalVolumeAccumulator, PoolInfo, SharingConfig,
+    UserVolumeAccumulator,
 };
 use crate::util::{
     calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
     create_ata_token_or_not_with_program, fee_config_pda, find_user_vol_accumulator,
-    gen_pubkey_with_seed, load_pool,
+    gen_pubkey_with_seed, load_pool, sharing_config_pda,
 };
 use anyhow::{Result, anyhow};
 use log::{debug, info};
@@ -141,6 +142,24 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
 
         account
             .map(|account| UserVolumeAccumulator::from_account_data(&account.data))
+            .transpose()
+    }
+
+    /// Fetch and decode a coin's [`SharingConfig`] from
+    /// [`sharing_config_pda`], or `None` when the coin has no fee split.
+    ///
+    /// `mint` is the coin's mint — for a pool, the non-SOL side
+    /// ([`PoolInfo::token_mint`]). Most coins have no config, so a missing
+    /// account is an ordinary result rather than an error; only a present
+    /// account that fails to decode returns `Err`.
+    pub async fn fetch_sharing_config(&self, mint: &Pubkey) -> Result<Option<SharingConfig>> {
+        let account = self
+            .rpc
+            .get_account_with_commitment(&sharing_config_pda(mint), self.rpc.commitment())
+            .await?
+            .value;
+        account
+            .map(|account| SharingConfig::from_account_data(&account.data))
             .transpose()
     }
 

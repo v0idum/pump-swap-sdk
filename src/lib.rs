@@ -65,8 +65,8 @@ pub use math::{
     quote_buy_exact_quote_in, quote_sell, sell_amount_out, token_buy_quote, token_sell_quote,
 };
 pub use state::{
-    FeeConfig, FeeTier, Fees, GlobalConfig, GlobalVolumeAccumulator, Pool, PoolInfo, TokenSide,
-    UserVolumeAccumulator, VOLUME_ACCUMULATOR_DAYS,
+    ConfigStatus, FeeConfig, FeeTier, Fees, GlobalConfig, GlobalVolumeAccumulator, Pool, PoolInfo,
+    Shareholder, SharingConfig, TokenSide, UserVolumeAccumulator, VOLUME_ACCUMULATOR_DAYS,
 };
 pub use util::{
     JitoPool, calc_lp_mint_pda, calc_pool_pda, calc_pool_pda_with_index,
@@ -75,5 +75,6 @@ pub use util::{
     find_coin_creator_vault_authority, find_user_vol_accumulator, gen_pubkey_with_seed, load_pool,
     load_pool_with_token_program, pick_buyback_fee_recipient, pick_protocol_fee_recipient,
     pick_protocol_fee_recipient_for_pool, pick_reserved_fee_recipient, pool_v2_pda,
-    send_bundle_with_retry, send_jito_bundle, user_volume_accumulator_quote_ata,
+    send_bundle_with_retry, send_jito_bundle, sharing_config_pda,
+    user_volume_accumulator_quote_ata,
 };
