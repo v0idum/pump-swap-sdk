@@ -183,6 +183,14 @@ const GLOBAL_CONFIG_DISCRIMINATOR: [u8; 8] = [0x95, 0x08, 0x9c, 0xca, 0xa0, 0xfc
 /// Anchor account discriminator for the fee program's `FeeConfig`.
 const FEE_CONFIG_DISCRIMINATOR: [u8; 8] = [0x8f, 0x34, 0x92, 0xbb, 0xdb, 0x7b, 0x4c, 0x9b];
 
+/// Anchor account discriminator for pump-amm's `UserVolumeAccumulator`.
+const USER_VOLUME_ACCUMULATOR_DISCRIMINATOR: [u8; 8] =
+    [0x56, 0xff, 0x70, 0x0e, 0x66, 0x35, 0x9a, 0xfa];
+
+/// Anchor account discriminator for pump-amm's `GlobalVolumeAccumulator`.
+const GLOBAL_VOLUME_ACCUMULATOR_DISCRIMINATOR: [u8; 8] =
+    [0xca, 0x2a, 0xf6, 0x2b, 0x8e, 0xbe, 0x1e, 0xff];
+
 /// Sequential borsh reader over raw account bytes.
 ///
 /// Every read is bounds-checked, so a truncated or unexpected account fails
@@ -244,6 +252,18 @@ impl<'a> Reader<'a> {
 
     fn u128(&mut self) -> Result<u128> {
         Ok(u128::from_le_bytes(self.take(16)?.try_into()?))
+    }
+
+    fn i64(&mut self) -> Result<i64> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into()?))
+    }
+
+    fn u64_array<const N: usize>(&mut self) -> Result<[u64; N]> {
+        let mut out = [0u64; N];
+        for slot in out.iter_mut() {
+            *slot = self.u64()?;
+        }
+        Ok(out)
     }
 
     fn pubkey(&mut self) -> Result<Pubkey> {
@@ -528,5 +548,193 @@ impl GlobalConfig {
         let mut out = [self.reserved_fee_recipient; 8];
         out[1..].copy_from_slice(&self.reserved_fee_recipients);
         out
+    }
+}
+
+/// Number of day-buckets in a [`GlobalVolumeAccumulator`]'s
+/// [`total_token_supply`](GlobalVolumeAccumulator::total_token_supply) and
+/// [`sol_volumes`](GlobalVolumeAccumulator::sol_volumes) arrays — one per day
+/// of the token-incentive program.
+pub const VOLUME_ACCUMULATOR_DAYS: usize = 30;
+
+/// pump-amm's `UserVolumeAccumulator` account, the PDA at
+/// [`find_user_vol_accumulator`](crate::util::find_user_vol_accumulator).
+///
+/// Every buy and sell passes this account, and the program maintains it
+/// through `init_user_volume_accumulator`,
+/// `sync_user_volume_accumulator`, `close_user_volume_accumulator`,
+/// `claim_cashback` and `claim_token_incentives`. A user who has never traded
+/// has no PDA at all — see
+/// [`PumpSwapClient::fetch_user_volume_accumulator`](crate::PumpSwapClient::fetch_user_volume_accumulator),
+/// which reports that as `None` rather than an error.
+///
+/// Field order matches the live IDL.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct UserVolumeAccumulator {
+    /// The trader this accumulator belongs to; the PDA's only seed input.
+    pub user: Pubkey,
+    pub needs_claim: bool,
+    /// Token incentives accrued and not yet claimed via
+    /// `claim_token_incentives`.
+    pub total_unclaimed_tokens: u64,
+    /// Token incentives claimed to date.
+    pub total_claimed_tokens: u64,
+    /// SOL volume counted toward the current incentive day, in lamports.
+    pub current_sol_volume: u64,
+    /// Unix timestamp of the last update, in seconds.
+    pub last_update_timestamp: i64,
+    pub has_total_claimed_tokens: bool,
+    /// Cashback accrued on cashback-coin trades, in lamports.
+    ///
+    /// The program credits this on swaps against pools whose
+    /// [`PoolInfo::is_cashback_coin`] is set, and `claim_cashback` pays out to
+    /// the user's WSOL account.
+    ///
+    /// **Do not difference this against [`Self::total_cashback_claimed`] to
+    /// get a claimable balance.** The two are not a cumulative pair. Mainnet
+    /// accumulator `112P247K33FPVxY8PHrT4u5dowFibaKhYcoForDK1FP` sits at
+    /// `cashback_earned = 89_356_599` and
+    /// `total_cashback_claimed = 249_797_601` immediately after a
+    /// `claim_cashback` (transaction
+    /// `jXWaHahomWjQ9fQn4LuBnXYf9m3Wci89RAoV8hxf8zcNQnN6ibhBTyNefKVZH9AEbzGLf4Xag582zYm6PFmBQDA`,
+    /// slot 439611975): a claim neither zeroes `cashback_earned` nor keeps it
+    /// above the claimed total, so neither "cumulative earned" nor "currently
+    /// claimable" describes it. Both are exposed as the raw counters they
+    /// are; simulate `claim_cashback` if you need the payout.
+    pub cashback_earned: u64,
+    /// Cashback counted as claimed, in lamports. See [`Self::cashback_earned`]
+    /// for why the two do not subtract.
+    pub total_cashback_claimed: u64,
+}
+
+impl UserVolumeAccumulator {
+    /// Minimum encoded size: 8-byte discriminator plus the IDL layout.
+    pub const ENCODED_LEN: usize = 8 + 32 + 1 + 8 * 3 + 8 + 1 + 8 * 2;
+
+    /// The state pump-amm starts a user at: every counter zero.
+    ///
+    /// This is what a user who has never traded effectively has, and what
+    /// `init_user_volume_accumulator` writes. Callers that would rather branch
+    /// on the numbers than on an `Option` can use it as the missing-account
+    /// substitute:
+    ///
+    /// ```
+    /// # use pump_swap_sdk::UserVolumeAccumulator;
+    /// # use solana_sdk::pubkey::Pubkey;
+    /// # async fn run(
+    /// #     client: &pump_swap_sdk::PumpSwapClient<std::sync::Arc<solana_client::nonblocking::rpc_client::RpcClient>>,
+    /// #     user: Pubkey,
+    /// # ) -> anyhow::Result<()> {
+    /// let accumulator = client
+    ///     .fetch_user_volume_accumulator(&user)
+    ///     .await?
+    ///     .unwrap_or_else(|| UserVolumeAccumulator::empty(user));
+    /// println!("cashback earned: {}", accumulator.cashback_earned);
+    /// # Ok(()) }
+    /// ```
+    pub fn empty(user: Pubkey) -> Self {
+        Self {
+            user,
+            ..Self::default()
+        }
+    }
+
+    /// Decode a `UserVolumeAccumulator` from raw account data, discriminator
+    /// included.
+    ///
+    /// Trailing bytes past the encoded layout are ignored: the live account is
+    /// 137 bytes against a 90-byte layout.
+    pub fn from_account_data(data: &[u8]) -> Result<Self> {
+        let mut reader = Reader::after_discriminator(
+            data,
+            &USER_VOLUME_ACCUMULATOR_DISCRIMINATOR,
+            "UserVolumeAccumulator",
+        )?;
+        Ok(Self {
+            user: reader.pubkey()?,
+            needs_claim: reader.bool()?,
+            total_unclaimed_tokens: reader.u64()?,
+            total_claimed_tokens: reader.u64()?,
+            current_sol_volume: reader.u64()?,
+            last_update_timestamp: reader.i64()?,
+            has_total_claimed_tokens: reader.bool()?,
+            cashback_earned: reader.u64()?,
+            total_cashback_claimed: reader.u64()?,
+        })
+    }
+}
+
+/// pump-amm's `GlobalVolumeAccumulator` account, stored at
+/// [`GLOBAL_VOLUME_ACCUMULATOR`](crate::constants::GLOBAL_VOLUME_ACCUMULATOR).
+///
+/// Holds the token-incentive program's schedule: a start and end time, a day
+/// length, the incentive [`mint`](Self::mint), and per-day token supply and
+/// SOL volume buckets. Both arrays are [`VOLUME_ACCUMULATOR_DAYS`] long.
+///
+/// The live account is zeroed as of 2026-09-20 — the incentive program is
+/// dormant, so [`Self::is_active_at`] is `false` for every timestamp and the
+/// buckets read as zero. That is real state, not a decoding failure; the
+/// discriminator check in [`Self::from_account_data`] is what distinguishes
+/// the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct GlobalVolumeAccumulator {
+    /// Unix timestamp the incentive program starts, in seconds.
+    pub start_time: i64,
+    /// Unix timestamp the incentive program ends, in seconds.
+    pub end_time: i64,
+    /// Length of one incentive day, in seconds.
+    pub seconds_in_a_day: i64,
+    /// Mint the token incentives are paid in.
+    pub mint: Pubkey,
+    /// Incentive tokens allocated to each day of the program.
+    pub total_token_supply: [u64; VOLUME_ACCUMULATOR_DAYS],
+    /// SOL volume accumulated on each day of the program, in lamports.
+    pub sol_volumes: [u64; VOLUME_ACCUMULATOR_DAYS],
+}
+
+impl GlobalVolumeAccumulator {
+    /// Minimum encoded size: 8-byte discriminator plus the IDL layout.
+    pub const ENCODED_LEN: usize = 8 + 8 * 3 + 32 + 8 * VOLUME_ACCUMULATOR_DAYS * 2;
+
+    /// Decode a `GlobalVolumeAccumulator` from raw account data,
+    /// discriminator included.
+    ///
+    /// Trailing bytes past the encoded layout are ignored: the live account is
+    /// 600 bytes against a 544-byte layout.
+    pub fn from_account_data(data: &[u8]) -> Result<Self> {
+        let mut reader = Reader::after_discriminator(
+            data,
+            &GLOBAL_VOLUME_ACCUMULATOR_DISCRIMINATOR,
+            "GlobalVolumeAccumulator",
+        )?;
+        Ok(Self {
+            start_time: reader.i64()?,
+            end_time: reader.i64()?,
+            seconds_in_a_day: reader.i64()?,
+            mint: reader.pubkey()?,
+            total_token_supply: reader.u64_array()?,
+            sol_volumes: reader.u64_array()?,
+        })
+    }
+
+    /// Whether `unix_timestamp` falls inside `[start_time, end_time)`.
+    ///
+    /// Always `false` while the account is zeroed.
+    pub fn is_active_at(&self, unix_timestamp: i64) -> bool {
+        self.start_time <= unix_timestamp && unix_timestamp < self.end_time
+    }
+
+    /// Index into [`Self::total_token_supply`] / [`Self::sol_volumes`] for
+    /// `unix_timestamp`, or `None` outside the program window, when
+    /// [`Self::seconds_in_a_day`] is non-positive, or when the elapsed day
+    /// count runs past the arrays.
+    pub fn day_index(&self, unix_timestamp: i64) -> Option<usize> {
+        if !self.is_active_at(unix_timestamp) || self.seconds_in_a_day <= 0 {
+            return None;
+        }
+        let day = (unix_timestamp - self.start_time) / self.seconds_in_a_day;
+        usize::try_from(day)
+            .ok()
+            .filter(|day| *day < VOLUME_ACCUMULATOR_DAYS)
     }
 }

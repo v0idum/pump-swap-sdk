@@ -64,7 +64,10 @@ pub use math::{
     constant_product_out, is_tiered_fee_pool, market_cap_lamports, quote_buy_exact_base_out,
     quote_buy_exact_quote_in, quote_sell, sell_amount_out, token_buy_quote, token_sell_quote,
 };
-pub use state::{FeeConfig, FeeTier, Fees, GlobalConfig, Pool, PoolInfo, TokenSide};
+pub use state::{
+    FeeConfig, FeeTier, Fees, GlobalConfig, GlobalVolumeAccumulator, Pool, PoolInfo, TokenSide,
+    UserVolumeAccumulator, VOLUME_ACCUMULATOR_DAYS,
+};
 pub use util::{
     JitoPool, calc_lp_mint_pda, calc_pool_pda, calc_pool_pda_with_index,
     calc_user_pool_token_account, clone_keypairs, create_ata_token_or_not,

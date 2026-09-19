@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Added
+
+- **Volume-accumulator read API.** `UserVolumeAccumulator` and
+  `GlobalVolumeAccumulator` deserializers in `state.rs`, plus
+  `PumpSwapClient::fetch_user_volume_accumulator` and
+  `PumpSwapClient::fetch_global_volume_accumulator`. The SDK could already
+  build the instructions that maintain these accounts
+  (`init_user_volume_accumulator`, `sync_user_volume_accumulator`,
+  `close_user_volume_accumulator`, `claim_cashback`,
+  `claim_token_incentives`) but could not read the resulting state, so
+  "how much cashback have I earned?" needed hand-rolled account parsing.
+
+  `fetch_user_volume_accumulator` returns `Option<UserVolumeAccumulator>`:
+  a user who has never traded has no PDA, and one closed through
+  `close_user_volume_accumulator` no longer has one. Neither is an error.
+  `UserVolumeAccumulator::empty(user)` is the all-zero substitute for
+  callers that would rather branch on the numbers than on the `Option`.
+
+  Both decoders reuse the bounds-checked `Reader` and validate the account
+  discriminator, so a truncated account or the wrong account type fails
+  loudly instead of decoding into plausible-looking garbage.
+  `GlobalVolumeAccumulator::day_index` maps a timestamp onto the 30 day
+  buckets, and `VOLUME_ACCUMULATOR_DAYS` is the bucket count.
+
+- `tests/volume_accumulator.rs` with mainnet account fixtures for both
+  accounts under `tests/fixtures/`, so the layout assertions run offline;
+  the live-RPC checks are `#[ignore]`d.
+
+  The token-incentive half of both accounts is dormant on mainnet as of
+  2026-09-20: the global accumulator is zeroed past its discriminator, and
+  every user accumulator sampled has zero token counters. Cashback is not
+  dormant — of 8,319,867 live `UserVolumeAccumulator` accounts, 1,255,705
+  carry non-zero cashback counters. The user fixture is one of them, taken
+  from a real `claim_cashback` transaction; the global fixture records the
+  zeroed account as it stands, and the `#[ignore]`d tests are the alarm for
+  the day that changes.
+
 ### Changed
 
 - **Dependencies brought up to their latest stable majors.** `solana-client`

@@ -34,6 +34,8 @@ the protocol supports.
 - Live fee-state decoding: pump-amm `GlobalConfig` and the fee program's
   `FeeConfig` (flat fees plus the standard and stable market-cap fee
   ladders), fetched in one RPC call.
+- Volume-accumulator decoding: a user's `UserVolumeAccumulator` (cashback and
+  token-incentive counters) and the program-wide `GlobalVolumeAccumulator`.
 - High-level `PumpSwapClient` for loading pools, simulating swaps,
   building transaction instruction sets, and submitting convenience
   buys/sells.
@@ -392,6 +394,12 @@ cargo doc --open
   `FeeConfig::fee_tier_for_market_cap` (and its `stable_` counterpart) picks
   the applicable tier, and `Fees::total_bps()` sums the lp/protocol/creator
   split.
+- `UserVolumeAccumulator`, `GlobalVolumeAccumulator`: decoded volume-accumulator
+  state. `PumpSwapClient::fetch_user_volume_accumulator` returns `None` for a
+  user who has never traded (no PDA) rather than an error;
+  `fetch_global_volume_accumulator` reads the program-wide account. Note that
+  `cashback_earned` and `total_cashback_claimed` are independent counters and
+  do not subtract into a claimable balance — see the type docs.
 - `calc_amount_out`, `buy_amount_out`, `sell_amount_out`: quote math helpers.
 - PDA helpers such as `calc_pool_pda`, `calc_lp_mint_pda`,
   `find_coin_creator_vault_authority`, `find_coin_creator_vault_ata`,
@@ -439,6 +447,9 @@ RPC_URL=https://my-private-rpc cargo test -- --ignored
 `FeeConfig` under `tests/fixtures/`, so the layout assertions run offline. Its
 `#[ignore]`d live tests re-run them against chain state and double as a drift
 alarm for the hardcoded fee-recipient tables in `constants.rs`.
+
+`tests/volume_accumulator.rs` does the same for the `UserVolumeAccumulator` and
+`GlobalVolumeAccumulator` accounts.
 
 ## License
 
