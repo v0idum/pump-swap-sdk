@@ -113,6 +113,31 @@ impl PoolInfo {
         }
     }
 
+    /// The coin's [`SharingConfig`] address when this pool's creator fees are
+    /// split, or `None` when they go to a single creator.
+    ///
+    /// A pool is fee-sharing when its `coin_creator` is the coin's sharing
+    /// config PDA, which pump-amm's `migrate_pool_coin_creator` writes there.
+    /// That instruction derives the config from **`pool.base_mint`**, so this
+    /// does too — a SOL-base pool therefore never matches, because its base
+    /// mint is WSOL. The official TypeScript SDK keys it the same way
+    /// (`feeSharingConfigPda(pool.baseMint)`).
+    ///
+    /// The address is derived, not read: a `Some` says the pool is wired to a
+    /// sharing config, not that the account exists or is
+    /// [`Active`](ConfigStatus::Active). Fetch it with
+    /// [`PumpSwapClient::fetch_sharing_config`](crate::client::PumpSwapClient::fetch_sharing_config)
+    /// to check.
+    ///
+    /// Fee-sharing pools cannot use `collect_coin_creator_fee` — pump-amm
+    /// rejects it with `CreatorVaultMigratedToSharingConfig`. Their fees go
+    /// out through `transfer_creator_fees_to_pump` followed by pump.fun's
+    /// `distribute_creator_fees`.
+    pub fn fee_sharing_config(&self) -> Option<Pubkey> {
+        let derived = crate::util::sharing_config_pda(&self.base_mint);
+        (self.coin_creator == derived).then_some(derived)
+    }
+
     /// Decode a pool account into a [`PoolInfo`].
     ///
     /// `data` is the raw account, discriminator included. The token programs
@@ -812,8 +837,11 @@ pub struct SharingConfig {
     pub status: ConfigStatus,
     /// The coin whose creator fees this config splits.
     pub mint: Pubkey,
-    /// Authority allowed to edit the split. Equal to
-    /// [`Pubkey::default()`] once `admin_revoked` is set.
+    /// Authority allowed to edit the split.
+    ///
+    /// Not cleared by `admin_revoked`: live configs exist with the flag set
+    /// and a non-zero `admin`, so read the flag, not the key, to decide
+    /// whether the split can still be edited.
     pub admin: Pubkey,
     pub admin_revoked: bool,
     pub shareholders: Vec<Shareholder>,

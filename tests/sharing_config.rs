@@ -90,11 +90,10 @@ fn decodes_a_paused_config_with_a_revoked_admin() {
     assert!(!config.is_active());
     assert_eq!(config.mint, PAUSED_MINT);
     assert!(config.admin_revoked);
-    assert_eq!(
-        config.admin,
-        Pubkey::default(),
-        "a revoked admin is zeroed on chain"
-    );
+    // This config's admin happens to be zeroed. Revocation does not imply it:
+    // live configs carry `admin_revoked` with a non-zero `admin`, so
+    // `SharingConfig::admin` is documented as independent of the flag.
+    assert_eq!(config.admin, Pubkey::default());
     assert!(config.shareholders.is_empty());
     assert_eq!(config.total_share_bps(), 0);
 }

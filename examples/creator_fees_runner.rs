@@ -1,5 +1,11 @@
-//! One cycle of the creator-fee claim flow: claim accrued fees from the
-//! coin-creator vault, then sweep the admin's surplus SOL to a target wallet.
+//! One cycle of the creator-fee claim flow for a **fee-sharing coin**: pay
+//! the coin's shareholders out of the coin-creator vault, then sweep the
+//! admin's surplus SOL to a target wallet.
+//!
+//! Everything but the mint is derived: the coin creator is the coin's
+//! [`sharing_config_pda`], and the shareholders are read from that config.
+//! A coin whose fees go to a single creator is not this flow — collect those
+//! with `PumpSwapClient::build_collect_coin_creator_fee_ixs`.
 //!
 //! Demonstrates: [`PumpSwapClient::withdraw_creator_fees`] and the
 //! [`find_coin_creator_vault_authority`] helper.
@@ -7,10 +13,7 @@
 //! Run:
 //!   RPC_URL=https://api.mainnet-beta.solana.com \
 //!   ADMIN_KEYPAIR=<base58_secret> \
-//!   COIN_CREATOR=<pubkey> \
 //!   TOKEN_MINT=<pubkey> \
-//!   BONDING_CURVE=<pubkey> \
-//!   SHARING_CONFIG=<pubkey> \
 //!   TARGET=<destination_pubkey> \
 //!   MIN_CLAIMABLE_SOL=0.5 \
 //!   RESERVE_SOL=0.01 \
@@ -29,6 +32,7 @@ use solana_system_interface::instruction as system_instruction;
 
 use pump_swap_sdk::{
     PumpSwapClient, WRAPPED_SOL_MINT, find_coin_creator_vault_authority, get_token_balance,
+    sharing_config_pda,
 };
 
 #[tokio::main]
@@ -39,10 +43,8 @@ async fn main() -> Result<()> {
     let admin = Keypair::from_base58_string(
         &std::env::var("ADMIN_KEYPAIR").context("ADMIN_KEYPAIR (base58) not set")?,
     );
-    let coin_creator = pk("COIN_CREATOR")?;
     let token_mint = pk("TOKEN_MINT")?;
-    let bonding_curve = pk("BONDING_CURVE")?;
-    let sharing_config = pk("SHARING_CONFIG")?;
+    let coin_creator = sharing_config_pda(&token_mint);
     let target = pk("TARGET")?;
     let min_claimable_lamports = match std::env::var("MIN_CLAIMABLE_SOL") {
         Ok(s) => sol_str_to_lamports(&s).context("MIN_CLAIMABLE_SOL is not a valid SOL amount")?,
@@ -64,16 +66,8 @@ async fn main() -> Result<()> {
     println!("vault claimable: {claimable_lamports} lamports");
 
     if claimable_lamports >= min_claimable_lamports {
-        client
-            .withdraw_creator_fees(
-                &admin,
-                &coin_creator,
-                &token_mint,
-                &bonding_curve,
-                &sharing_config,
-            )
-            .await?;
-        println!("claimed creator fees");
+        client.withdraw_creator_fees(&admin, &token_mint).await?;
+        println!("distributed creator fees to the coin's shareholders");
     } else {
         println!("below threshold ({min_claimable_lamports} lamports); skipping claim");
     }

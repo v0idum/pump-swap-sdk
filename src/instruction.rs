@@ -1,12 +1,13 @@
 use crate::constants::{
-    EVENT_AUTHORITY, FEE_PROGRAM, GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR, PUMP_CREATOR_VAULT,
-    PUMP_SWAP_PROGRAM_ID, PUMPFUN_EVENT_AUTHORITY, PUMPFUN_PROGRAM, WRAPPED_SOL_MINT,
+    EVENT_AUTHORITY, FEE_PROGRAM, GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR, PUMP_SWAP_PROGRAM_ID,
+    PUMPFUN_EVENT_AUTHORITY, PUMPFUN_PROGRAM, WRAPPED_SOL_MINT,
 };
 use crate::state::PoolInfo;
 use crate::util::{
-    calc_lp_mint_pda, calc_user_pool_token_account, fee_config_pda, find_coin_creator_vault_ata,
-    find_coin_creator_vault_authority, find_user_vol_accumulator, pick_buyback_fee_recipient,
-    pick_protocol_fee_recipient_for_pool, pool_v2_pda, user_volume_accumulator_quote_ata,
+    bonding_curve_pda, calc_lp_mint_pda, calc_user_pool_token_account, fee_config_pda,
+    find_coin_creator_vault_ata, find_coin_creator_vault_authority, find_user_vol_accumulator,
+    pick_buyback_fee_recipient, pick_protocol_fee_recipient_for_pool, pool_v2_pda,
+    pump_creator_vault_pda, sharing_config_pda, user_volume_accumulator_quote_ata,
 };
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
@@ -598,6 +599,11 @@ pub fn make_claim_token_incentives_instruction(
 /// Build a pump-amm `collect_coin_creator_fee` instruction. This is the
 /// current direct collect path from the coin-creator vault ATA into the coin
 /// creator's quote token account.
+///
+/// Single-creator coins only. pump-amm rejects this for a coin whose fees are
+/// split (`CreatorVaultMigratedToSharingConfig`); those go through
+/// [`transfer_creator_fees_to_pump_instruction`] and
+/// [`distribute_creator_fees_instruction`].
 pub fn make_collect_coin_creator_fee_instruction(
     coin_creator: &Pubkey,
     quote_mint: &Pubkey,
@@ -820,9 +826,21 @@ pub fn withdraw_instruction(
     })
 }
 
-/// Build the pump-amm instruction that moves accrued creator fees from the
-/// coin-creator vault back into the pump.fun program's creator vault, so they
-/// can subsequently be distributed via [`distribute_creator_fees_instruction`].
+/// Build the pump-amm `transfer_creator_fees_to_pump` instruction, which
+/// moves accrued creator fees from the pump-amm coin-creator vault into
+/// pump.fun's creator vault, where [`distribute_creator_fees_instruction`]
+/// pays them out.
+///
+/// WSOL only — the instruction's first account is a fixed `wsol_mint`. For any
+/// other quote mint use
+/// [`transfer_creator_fees_to_pump_v2_instruction`].
+///
+/// `coin_creator` is `Pool.coin_creator`, which for a fee-sharing coin is the
+/// coin's [`sharing_config_pda`] — see
+/// [`PoolInfo::fee_sharing_config`].
+///
+/// The program skips the transfer when the vault holds less than
+/// `rent.minimum_balance(TokenAccount::LEN)`.
 pub fn transfer_creator_fees_to_pump_instruction(coin_creator: &Pubkey) -> Result<Instruction> {
     let coin_creator_vault_authority = find_coin_creator_vault_authority(coin_creator);
     let coin_creator_vault_ata = find_coin_creator_vault_ata(
@@ -839,7 +857,7 @@ pub fn transfer_creator_fees_to_pump_instruction(coin_creator: &Pubkey) -> Resul
         AccountMeta::new_readonly(*coin_creator, false),
         AccountMeta::new(coin_creator_vault_authority, false),
         AccountMeta::new(coin_creator_vault_ata, false),
-        AccountMeta::new(PUMP_CREATOR_VAULT, false),
+        AccountMeta::new(pump_creator_vault_pda(coin_creator), false),
         AccountMeta::new_readonly(EVENT_AUTHORITY, false),
         AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
     ];
@@ -851,29 +869,154 @@ pub fn transfer_creator_fees_to_pump_instruction(coin_creator: &Pubkey) -> Resul
     })
 }
 
-/// pump.fun `distribute_creator_fees` instruction — pays out fees from the pump
-/// program's creator vault to the admin/sharing destinations.
+/// Build the pump-amm `transfer_creator_fees_to_pump_v2` instruction: the
+/// any-quote-mint form of [`transfer_creator_fees_to_pump_instruction`].
+///
+/// Beyond the quote mint, v2 differs in two ways: `payer` signs and funds the
+/// pump creator vault's quote ATA when it does not exist, and that ATA is part
+/// of the account list even for WSOL.
+///
+/// `quote_token_program` must own `quote_mint` — `spl_token::ID` or
+/// `spl_token_2022::ID`. Every quote-side ATA is derived under it.
+pub fn transfer_creator_fees_to_pump_v2_instruction(
+    payer: &Pubkey,
+    coin_creator: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_token_program: &Pubkey,
+) -> Result<Instruction> {
+    let coin_creator_vault_authority = find_coin_creator_vault_authority(coin_creator);
+    let coin_creator_vault_ata = find_coin_creator_vault_ata(
+        &coin_creator_vault_authority,
+        quote_token_program,
+        quote_mint,
+    );
+    let pump_creator_vault = pump_creator_vault_pda(coin_creator);
+    let pump_creator_vault_ata =
+        find_coin_creator_vault_ata(&pump_creator_vault, quote_token_program, quote_mint);
+
+    let accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(*quote_mint, false),
+        AccountMeta::new_readonly(*quote_token_program, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+        AccountMeta::new_readonly(*coin_creator, false),
+        AccountMeta::new(coin_creator_vault_authority, false),
+        AccountMeta::new(coin_creator_vault_ata, false),
+        AccountMeta::new(pump_creator_vault, false),
+        AccountMeta::new(pump_creator_vault_ata, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![1, 33, 78, 185, 33, 67, 44, 92],
+    })
+}
+
+/// pump.fun `distribute_creator_fees` — pays the coin's accrued creator fees
+/// out of pump.fun's creator vault to the coin's shareholders, as lamports.
+///
+/// `shareholders` must be every [`Shareholder::address`](crate::state::Shareholder)
+/// of the coin's [`SharingConfig`](crate::state::SharingConfig), **in the
+/// stored order**; the program compares them position by position and fails
+/// with `ShareholdersAndRemainingAccountsMismatch` otherwise. Read them with
+/// [`PumpSwapClient::fetch_sharing_config`](crate::client::PumpSwapClient::fetch_sharing_config),
+/// or use
+/// [`PumpSwapClient::build_creator_fee_withdraw_ixs`](crate::client::PumpSwapClient::build_creator_fee_withdraw_ixs),
+/// which fetches them for you.
+///
+/// Every other account is derived from `mint`. The creator vault is
+/// `["creator-vault", BondingCurve.creator]`, and the program requires that
+/// creator to equal the coin's sharing config
+/// (`BondingCurveAndSharingConfigCreatorMismatch`), so
+/// [`sharing_config_pda`] stands in for it
+/// here.
+///
+/// The instruction takes no signer of its own; the transaction's fee payer is
+/// enough. It is permissionless, and the program requires the config to be
+/// `Active` and the vault to hold at least the minimum distributable amount.
+///
+/// For a non-WSOL quote mint, use
+/// [`distribute_creator_fees_v2_instruction`].
 pub fn distribute_creator_fees_instruction(
     mint: &Pubkey,
-    bonding_curve: &Pubkey,
-    sharing_config: &Pubkey,
-    admin_account: &Pubkey,
+    shareholders: &[Pubkey],
 ) -> Result<Instruction> {
-    let accounts = vec![
+    let sharing_config = sharing_config_pda(mint);
+
+    let mut accounts = vec![
         AccountMeta::new_readonly(*mint, false),
-        AccountMeta::new_readonly(*bonding_curve, false),
-        AccountMeta::new_readonly(*sharing_config, false),
-        AccountMeta::new(PUMP_CREATOR_VAULT, false),
+        AccountMeta::new_readonly(bonding_curve_pda(mint), false),
+        AccountMeta::new_readonly(sharing_config, false),
+        AccountMeta::new(pump_creator_vault_pda(&sharing_config), false),
         AccountMeta::new_readonly(system_program::ID, false),
         AccountMeta::new_readonly(PUMPFUN_EVENT_AUTHORITY, false),
         AccountMeta::new_readonly(PUMPFUN_PROGRAM, false),
-        AccountMeta::new(*admin_account, true),
     ];
+    accounts.extend(
+        shareholders
+            .iter()
+            .map(|holder| AccountMeta::new(*holder, false)),
+    );
 
     Ok(Instruction {
         program_id: PUMPFUN_PROGRAM,
         accounts,
         data: vec![165, 114, 103, 0, 121, 206, 247, 81],
+    })
+}
+
+/// pump.fun `distribute_creator_fees_v2` — the quote-token form of
+/// [`distribute_creator_fees_instruction`], paying shareholders in
+/// `quote_mint` rather than lamports.
+///
+/// `payer` signs. `initialize_ata` asks the program to create a shareholder's
+/// quote ATA when it is missing, at `payer`'s expense; with `false` a missing
+/// ATA fails the instruction.
+///
+/// The same ordering rule applies to `shareholders` as in
+/// [`distribute_creator_fees_instruction`].
+pub fn distribute_creator_fees_v2_instruction(
+    payer: &Pubkey,
+    mint: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_token_program: &Pubkey,
+    initialize_ata: bool,
+    shareholders: &[Pubkey],
+) -> Result<Instruction> {
+    let sharing_config = sharing_config_pda(mint);
+    let creator_vault = pump_creator_vault_pda(&sharing_config);
+
+    let mut accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(*mint, false),
+        AccountMeta::new_readonly(bonding_curve_pda(mint), false),
+        AccountMeta::new_readonly(sharing_config, false),
+        AccountMeta::new(creator_vault, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(PUMPFUN_EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMPFUN_PROGRAM, false),
+        AccountMeta::new(
+            find_coin_creator_vault_ata(&creator_vault, quote_token_program, quote_mint),
+            false,
+        ),
+        AccountMeta::new_readonly(*quote_mint, false),
+        AccountMeta::new_readonly(*quote_token_program, false),
+        AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+    ];
+    accounts.extend(
+        shareholders
+            .iter()
+            .map(|holder| AccountMeta::new(*holder, false)),
+    );
+
+    Ok(Instruction {
+        program_id: PUMPFUN_PROGRAM,
+        accounts,
+        data: vec![255, 203, 19, 79, 244, 68, 8, 159, u8::from(initialize_ata)],
     })
 }
 
