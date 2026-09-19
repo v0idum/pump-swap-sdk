@@ -9,7 +9,7 @@ use base64::engine::general_purpose;
 use bytemuck::from_bytes;
 use jito_sdk_rust::JitoJsonRpcSDK;
 use log::info;
-use rand::RngCore;
+use rand::Rng;
 use rand::seq::IndexedRandom;
 use serde_json::json;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -251,7 +251,7 @@ pub fn clone_keypairs(slice: &[Keypair]) -> Result<Vec<Keypair>> {
     slice
         .iter()
         .map(|kp| {
-            Keypair::from_bytes(&kp.to_bytes())
+            Keypair::try_from(&kp.to_bytes()[..])
                 .map_err(|e| anyhow!("Failed to clone keypair: {}", e))
         })
         .collect()
@@ -261,7 +261,10 @@ pub fn clone_keypairs(slice: &[Keypair]) -> Result<Vec<Keypair>> {
 pub async fn send_jito_bundle(txs: Vec<Transaction>, jito_sdk: Arc<JitoJsonRpcSDK>) -> Result<()> {
     let serialized_txs = txs
         .iter()
-        .map(|tx| Ok(general_purpose::STANDARD.encode(bincode::serialize(tx)?)))
+        .map(|tx| {
+            let bytes = bincode::serde::encode_to_vec(tx, bincode::config::legacy())?;
+            Ok(general_purpose::STANDARD.encode(bytes))
+        })
         .collect::<Result<Vec<_>>>()?;
     let bundle = json!(serialized_txs);
     let params = json!([bundle, { "encoding": "base64" }]);

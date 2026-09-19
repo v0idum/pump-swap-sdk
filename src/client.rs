@@ -23,13 +23,13 @@ use crate::util::{
 use anyhow::{Result, anyhow};
 use log::{debug, info};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::compute_budget::ComputeBudgetInstruction;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::rent::Rent;
 use solana_sdk::signature::{Keypair, Signer};
-use solana_sdk::system_instruction;
 use solana_sdk::transaction::Transaction;
+use solana_system_interface::instruction as system_instruction;
 use spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 use spl_token::instruction::{close_account as spl_token_close_account, initialize_account};
 use spl_token::solana_program::program_pack::Pack;
@@ -1359,13 +1359,16 @@ pub async fn get_token_balance(
     );
     match rpc.get_token_account_balance(&token_account).await {
         Ok(balance) => Ok(Some(balance.amount.parse()?)),
-        Err(solana_client::client_error::ClientError {
-            kind:
+        Err(solana_client::client_error::ClientError { ref kind, .. })
+            if matches!(
+                **kind,
                 solana_client::client_error::ClientErrorKind::RpcError(
-                    solana_client::rpc_request::RpcError::ForUser(msg),
-                ),
-            ..
-        }) if msg.contains("AccountNotFound") || msg.contains("could not find account") => Ok(None),
+                    solana_client::rpc_request::RpcError::ForUser(ref msg),
+                ) if msg.contains("AccountNotFound") || msg.contains("could not find account")
+            ) =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -1532,14 +1535,16 @@ mod orientation_tests {
 
         let funding = |ixs: &[Instruction]| -> u64 {
             // create_account_with_seed lamports arg lives in the first system ix
-            use solana_sdk::system_instruction::SystemInstruction;
+            use solana_system_interface::instruction::SystemInstruction;
             for ix in ixs {
-                if ix.program_id == solana_sdk::system_program::ID {
-                    if let Ok(SystemInstruction::CreateAccountWithSeed { lamports, .. }) =
-                        bincode::deserialize::<SystemInstruction>(&ix.data)
-                    {
-                        return lamports;
-                    }
+                if ix.program_id == solana_system_interface::program::ID
+                    && let Ok((SystemInstruction::CreateAccountWithSeed { lamports, .. }, _)) =
+                        bincode::serde::decode_from_slice::<SystemInstruction, _>(
+                            &ix.data,
+                            bincode::config::legacy(),
+                        )
+                {
+                    return lamports;
                 }
             }
             panic!("no create_account_with_seed found")

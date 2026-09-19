@@ -411,9 +411,9 @@ mod live {
     use pump_swap_sdk::PumpSwapClient;
     use solana_client::nonblocking::rpc_client::RpcClient;
     use solana_client::rpc_config::RpcSimulateTransactionConfig;
-    use solana_sdk::commitment_config::CommitmentConfig;
+    use solana_commitment_config::CommitmentConfig;
+    use solana_native_token::LAMPORTS_PER_SOL;
     use solana_sdk::message::Message;
-    use solana_sdk::native_token::sol_to_lamports;
     use solana_sdk::pubkey::Pubkey;
     use solana_sdk::transaction::Transaction;
     use std::str::FromStr;
@@ -448,7 +448,7 @@ mod live {
             .await
             .expect("load pool");
 
-        let sol_in = sol_to_lamports(0.001);
+        let sol_in = LAMPORTS_PER_SOL / 1_000; // 0.001 SOL
         let quote = client
             .quote_token_buy(sol_in, &pool_info, slippage)
             .await

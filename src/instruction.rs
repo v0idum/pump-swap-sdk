@@ -12,7 +12,7 @@ use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::system_program;
+use solana_system_interface::program as system_program;
 
 /// Common trait for serializing instructions to `Vec<u8>`.
 pub trait ToInstructionBytes {

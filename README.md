@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/pump-swap-sdk.svg)](https://crates.io/crates/pump-swap-sdk)
 [![Docs.rs](https://docs.rs/pump-swap-sdk/badge.svg)](https://docs.rs/pump-swap-sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.97.1-blue.svg)](Cargo.toml)
 
 Rust SDK for [Pump.fun's PumpSwap (pump-amm)](https://swap.pump.fun/) AMM on
 Solana.
@@ -48,7 +48,7 @@ Install from crates.io:
 pump-swap-sdk = "0.5.0"
 ```
 
-Requires Rust 1.85+.
+Requires Rust 1.97.1+.
 
 Or install directly from Git:
 
@@ -65,9 +65,14 @@ client types and an async runtime:
 pump-swap-sdk = "0.5.0"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-solana-client = "2"
-solana-sdk = "2"
+solana-client = "4"
+solana-sdk = "4"
+solana-commitment-config = "3"
 ```
+
+`CommitmentConfig` now lives in its own crate: the `solana-sdk` 2.x → 4.x split
+moved it (and `system_instruction`, `compute_budget`, `system_program`) out of
+the monolithic crate.
 
 ## Quickstart
 
@@ -80,7 +85,7 @@ use std::sync::Arc;
 
 use pump_swap_sdk::PumpSwapClient;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::commitment_config::CommitmentConfig;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 
 #[tokio::main]
@@ -132,10 +137,10 @@ account, optionally creates the user's token ATA, builds the pump-amm Buy
 instruction, and closes the WSOL account back to the payer.
 
 ```rust
-use solana_sdk::native_token::sol_to_lamports;
+use solana_native_token::LAMPORTS_PER_SOL;
 use solana_sdk::signature::Signer;
 
-let amount_in = sol_to_lamports(0.01);
+let amount_in = LAMPORTS_PER_SOL / 100; // 0.01 SOL
 // Subtracts the pool's live, market-cap-tiered fee before applying slippage,
 // so 0.1% here is a slippage budget and nothing else.
 let quote = client.quote_token_buy(amount_in, &pool_info, 0.001).await?;
@@ -162,9 +167,9 @@ For "spend exactly N SOL, accept ≥ min base out" semantics — what most
 trader bots want — use the `buy_exact_quote_in` family:
 
 ```rust
-use solana_sdk::native_token::sol_to_lamports;
+use solana_native_token::LAMPORTS_PER_SOL;
 
-let spend = sol_to_lamports(0.01);
+let spend = LAMPORTS_PER_SOL / 100; // 0.01 SOL
 let instructions = client.build_buy_exact_quote_in_ixs(
     spend,
     1, // min_base_amount_out (program rejects 0)
@@ -265,7 +270,7 @@ println!("tx: {sig}");
 ### Simulate before sending
 
 ```rust
-client.simulate_buy(&pool_info, sol_to_lamports(0.001), &payer).await?;
+client.simulate_buy(&pool_info, LAMPORTS_PER_SOL / 1_000, &payer).await?; // 0.001 SOL
 client.simulate_sell(&pool_info, base_amount_in, &payer).await?;
 ```
 

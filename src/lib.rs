@@ -11,10 +11,14 @@
 //! from `PoolInfo` + `user`.
 //!
 //! # Quickstart
+//!
+//! `CommitmentConfig` lives in its own `solana-commitment-config` crate; the
+//! monolithic `solana-sdk` no longer re-exports it.
+//!
 //! ```no_run
 //! use std::sync::Arc;
 //! use solana_client::nonblocking::rpc_client::RpcClient;
-//! use solana_sdk::commitment_config::CommitmentConfig;
+//! use solana_commitment_config::CommitmentConfig;
 //! use solana_sdk::pubkey::Pubkey;
 //! use std::str::FromStr;
 //! use pump_swap_sdk::{load_pool, PumpSwapClient};

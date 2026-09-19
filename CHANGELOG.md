@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Dependencies brought up to their latest stable majors.** `solana-client`
+  2.1.5 → 4.3.0, `solana-sdk` 2.1.5 → 4.1.0, `spl-token` 7 → 9,
+  `spl-token-2022` 7 → 11, `spl-associated-token-account` 6 → 8, `bincode`
+  1.3.3 → 2.0.1, `base64` 0.21.7 → 0.23.1, `rand` 0.9 → 0.10.2, `bytemuck`
+  1.20 → 1.25.2. `jito-sdk-rust` was already current at 0.3.2.
+
+  The `solana-sdk` 2.x line has since been split into granular `solana-*`
+  crates, and four items this SDK uses left the monolith. They are now direct
+  dependencies: `ComputeBudgetInstruction` from `solana-compute-budget-interface`,
+  and `system_instruction` / `system_program` from `solana-system-interface`.
+  `CommitmentConfig` (`solana-commitment-config`) and `LAMPORTS_PER_SOL`
+  (`solana-native-token`) moved out too; both are only used by the examples and
+  tests, so they are dev-dependencies.
+
+- **MSRV raised from 1.85 to 1.97.1.** Required by the `solana-client` 4.3.0
+  stack, which declares `rust-version = "1.97.1"` across ~40 crates. This is the
+  highest MSRV in the resolved graph; the build and full test suite are verified
+  against exactly that toolchain. `edition` stays at `2024`.
+
+- **`send_jito_bundle` and the system-instruction decode moved to the `bincode`
+  2 API.** `bincode::serialize` / `deserialize` became
+  `bincode::serde::encode_to_vec` / `decode_from_slice` with
+  `bincode::config::legacy()`, which is the configuration that reproduces
+  bincode 1.3's format (little-endian, fixed-int). Verified byte-for-byte: a
+  signed `Transaction` encodes to the same 260 bytes under bincode 1.3.3 and
+  bincode 2.0.1 `legacy()`. `tests/wire_format.rs` pins that encoding to a
+  golden vector captured from bincode 1.3.3 so a future bump cannot move it
+  silently.
+
+- Example and README amounts that used `solana_sdk::native_token::sol_to_lamports`
+  now derive from `LAMPORTS_PER_SOL` or parse with `sol_str_to_lamports`.
+  `solana-native-token` 3.0 dropped the lossy `f64` converters
+  (`sol_to_lamports` / `lamports_to_sol`). The constants are unchanged:
+  `sol_to_lamports(0.001)` was exactly `1_000_000`.
+
+### Held back
+
+- **`bincode` stays on 2.0.1, not 3.0.0.** bincode 3.0.0 is not a usable
+  release — its entire source is `compile_error!("https://xkcd.com/2347/")`.
+  2.0.1 is the latest version that builds.
+
+- **`solana-sdk` stays on 4.1.0, not 5.0.0.** `solana-sdk` 5.0.0 depends on
+  `solana-transaction` 5.x and `solana-message` 5.x, while the latest stable
+  `solana-client` (4.3.0) is built on the 4.x line. Pairing them puts two
+  incompatible `Transaction` types in the graph and
+  `solana_sdk::transaction::Transaction` stops satisfying the
+  `SerializableTransaction` bound every `send_*` / `simulate_*` call needs.
+  There is no stable `solana-client` 5.x yet (only `4.4.0-alpha.5`).
+  `solana-sdk` 4.1.0 is the newest release whose granular dependencies unify
+  with `solana-client` 4.3.0.
+
+### Fixed
+
+- `Cargo.lock` pins `five8_core` to 1.0.0. `five8` 1.0.0 requests
+  `five8_core >=0.1.1, <2` and cargo would otherwise select 0.1.2, whose
+  `DecodeError` predates the `core::error::Error` impl that
+  `solana-keypair` 3.1.2 requires — the dependency graph does not compile
+  without the pin.
+
 ## 0.5.0 - 2026-09-20
 
 ### Fixed

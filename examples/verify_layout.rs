@@ -16,10 +16,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
-use solana_sdk::commitment_config::CommitmentConfig;
+use solana_commitment_config::CommitmentConfig;
+use solana_native_token::LAMPORTS_PER_SOL;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::message::Message;
-use solana_sdk::native_token::sol_to_lamports;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     println!("reserves: base={base_reserve} quote={quote_reserve}");
 
     // Small amount so the layout check works against typical test wallets.
-    let amount_in = sol_to_lamports(0.001);
+    let amount_in = LAMPORTS_PER_SOL / 1_000; // 0.001 SOL
     let base_amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, 0.1);
     println!("buy_amount_in={amount_in} base_amount_out={base_amount_out}");
     let buy_ixs = client.build_buy_ixs(
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
     }
 
     // buy_exact_quote_in: small amount, min 1 base out (program rejects 0).
-    let spend = sol_to_lamports(0.001);
+    let spend = LAMPORTS_PER_SOL / 1_000; // 0.001 SOL
     let bxqi_ixs =
         client.build_buy_exact_quote_in_ixs(spend, 1, true, &pool_info, &user_pubkey, true)?;
     let bxqi_ix = find_pump_amm_ix(&bxqi_ixs, &[198, 46, 21, 82, 180, 217, 232, 112])?;

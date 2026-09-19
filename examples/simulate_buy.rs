@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::native_token::sol_to_lamports;
+use solana_commitment_config::CommitmentConfig;
+use solana_native_token::{LAMPORTS_PER_SOL, sol_str_to_lamports};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 
@@ -26,10 +26,10 @@ async fn main() -> Result<()> {
     let rpc_url = std::env::var("RPC_URL").context("RPC_URL not set")?;
     let pool = std::env::var("POOL").context("POOL not set")?;
     let keypair_b58 = std::env::var("KEYPAIR").context("KEYPAIR (base58 secret) not set")?;
-    let amount_sol: f64 = std::env::var("AMOUNT_SOL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.001);
+    let amount_lamports = match std::env::var("AMOUNT_SOL") {
+        Ok(s) => sol_str_to_lamports(&s).context("AMOUNT_SOL is not a valid SOL amount")?,
+        Err(_) => LAMPORTS_PER_SOL / 1_000, // 0.001 SOL
+    };
 
     let rpc = Arc::new(RpcClient::new_with_commitment(
         rpc_url,
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     let payer = Keypair::from_base58_string(&keypair_b58);
 
     client
-        .simulate_buy(&pool_info, sol_to_lamports(amount_sol), &payer)
+        .simulate_buy(&pool_info, amount_lamports, &payer)
         .await?;
     Ok(())
 }
