@@ -1,6 +1,6 @@
 use crate::constants::{
     BUYBACK_FEE_RECIPIENTS, FEE_PROGRAM, PROTOCOL_FEE_RECIPIENTS, PUMP_SWAP_PROGRAM_ID,
-    PUMPFUN_PROGRAM, RESERVED_FEE_RECIPIENTS,
+    PUMPFUN_PROGRAM, RESERVED_FEE_RECIPIENTS, TOKEN_METADATA_PROGRAM,
 };
 use crate::state::{Pool, PoolInfo};
 use anyhow::{Result, anyhow};
@@ -382,6 +382,23 @@ pub fn bonding_curve_pda(mint: &Pubkey) -> Pubkey {
 /// coin is the coin's [`sharing_config_pda`].
 pub fn pump_creator_vault_pda(creator: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &PUMPFUN_PROGRAM).0
+}
+
+/// PDA: `["metadata", metaplex_program, mint]` under the
+/// [`TOKEN_METADATA_PROGRAM`].
+///
+/// The mint's Metaplex metadata account, read by `set_coin_creator`.
+///
+/// The address derives for any mint, but the account only exists where
+/// Metaplex metadata was actually minted: pump.fun coins issued on
+/// Token-2022 carry their metadata as a mint extension instead, and for those
+/// the derived address is empty.
+pub fn token_metadata_pda(mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"metadata", TOKEN_METADATA_PROGRAM.as_ref(), mint.as_ref()],
+        &TOKEN_METADATA_PROGRAM,
+    )
+    .0
 }
 
 /// PDA: `["pool-v2", base_mint]` under pump-amm. Required as a remaining

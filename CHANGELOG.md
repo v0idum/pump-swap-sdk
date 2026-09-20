@@ -83,6 +83,32 @@
   which lets the program create a shareholder's missing quote ATA.
   `PumpSwapClient::build_creator_fee_withdraw_ixs_v2` composes the pair.
 
+- **`set_coin_creator_instruction` and `migrate_pool_coin_creator_instruction`**,
+  the two pump-amm instructions that write a pool's `coin_creator`. Neither
+  takes arguments or a signer: both take the pool and its base mint and derive
+  everything else, and both are permissionless.
+
+  `set_coin_creator` backfills the field on a canonical pump pool created
+  before it was populated, reading the authoritative creator from the coin's
+  pump.fun bonding curve (`["bonding-curve", base_mint]`) and its Metaplex
+  metadata account. That metadata account is the practical limit on which
+  pools it applies to: pump.fun coins minted on Token-2022 carry their
+  metadata as a mint extension and have none, but they postdate the
+  `coin_creator` field. A non-graduation pool is rejected with
+  `OnlyCanonicalPumpPoolsCanHaveCoinCreator`.
+
+  `migrate_pool_coin_creator` repoints `coin_creator` at the coin's
+  `SharingConfig`, which is the state `PoolInfo::fee_sharing_config()` detects
+  and what moves a pool onto the `transfer_creator_fees_to_pump` /
+  `distribute_creator_fees` route.
+
+  Account orders are transcribed from the live pump-amm IDL and every derived
+  address in `tests/coin_creator_ix.rs` is pinned against a mainnet account.
+
+- **`util::token_metadata_pda` and the `TOKEN_METADATA_PROGRAM` constant**
+  (`["metadata", metaplex_program, mint]` under Metaplex Token Metadata),
+  which `set_coin_creator` needs. The seed list repeats the program id.
+
 - **PDA helpers `bonding_curve_pda` and `pump_creator_vault_pda`**
   (`["bonding-curve", mint]` and `["creator-vault", creator]`, both under
   pump.fun). Note `pump_creator_vault_pda`'s hyphen: pump-amm's own

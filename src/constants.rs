@@ -24,6 +24,13 @@ pub const PUMPFUN_EVENT_AUTHORITY: Pubkey = pubkey!("Ce6TQqeHC9p8KetsN6JsjHK7UTZ
 )]
 pub const PUMP_CREATOR_VAULT: Pubkey = pubkey!("8CoWk2ZYjsBZEy8yLqWEK9mtZ8tkAbAFrbmtyyuhEqGg");
 
+/// Metaplex Token Metadata program.
+///
+/// `set_coin_creator` reads the base mint's metadata account, derived with
+/// [`token_metadata_pda`](crate::util::token_metadata_pda), to resolve the
+/// creator it writes onto the pool.
+pub const TOKEN_METADATA_PROGRAM: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+
 /// pump fee program — owns fee_config and exposes `get_fees`.
 pub const FEE_PROGRAM: Pubkey = pubkey!("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
 
