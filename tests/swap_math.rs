@@ -440,7 +440,43 @@ mod live {
         )))
     }
 
+    /// The program's `ExceededSlippage`, as `simulate_transaction` reports it.
+    const EXCEEDED_SLIPPAGE: &str = "Custom(6004)";
+
+    /// How many times to re-quote before believing an `ExceededSlippage`.
+    const SLIPPAGE_ATTEMPTS: usize = 4;
+
+    /// Simulate a 0.001 SOL buy at `slippage`, re-quoting when the program
+    /// rejects it with `ExceededSlippage`.
+    ///
+    /// Reserves are read by the quote in one RPC call and the simulation runs
+    /// in another, so a swap landing in between leaves the quote stale. At
+    /// tight slippage there is no margin to absorb that drift and the program
+    /// rejects the transaction — on a busy pool, often enough to make a 0%
+    /// assertion useless.
+    ///
+    /// Re-quoting separates the two causes rather than hiding either. A stale
+    /// quote succeeds against freshly read reserves; a real disagreement
+    /// between this SDK's arithmetic and the program's reproduces on every
+    /// attempt, because it does not depend on what other traders are doing.
+    /// Widening `slippage` would also make the test pass, and would throw away
+    /// the only thing it is here to prove.
     async fn simulate_token_buy_at(pool: &str, slippage: f64) -> (u64, Option<String>) {
+        let mut last = (0, None);
+        for attempt in 1..=SLIPPAGE_ATTEMPTS {
+            last = simulate_token_buy_once(pool, slippage).await;
+            let stale = last
+                .1
+                .as_deref()
+                .is_some_and(|err| err.contains(EXCEEDED_SLIPPAGE));
+            if !stale || attempt == SLIPPAGE_ATTEMPTS {
+                break;
+            }
+        }
+        last
+    }
+
+    async fn simulate_token_buy_once(pool: &str, slippage: f64) -> (u64, Option<String>) {
         let client = client();
         let payer = Pubkey::from_str(SIM_PAYER).expect("valid pubkey");
         let pool_info = client
