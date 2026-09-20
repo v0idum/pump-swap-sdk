@@ -2,6 +2,135 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`distribute_creator_fees_instruction` built an instruction the program
+  could not accept.** It could never have paid out for any coin but one, so
+  every caller of the creator-fee payout route was broken. Three faults, each
+  independently fatal:
+
+  1. It passed the `PUMP_CREATOR_VAULT` constant as the creator vault. The
+     vault is per creator — `["creator-vault", BondingCurve.creator]` — so
+     that address was correct for exactly one coin and failed a seeds
+     constraint for every other.
+  2. It passed no shareholder accounts. The program matches its remaining
+     accounts against the config's shareholders position by position and
+     fails with `ShareholdersAndRemainingAccountsMismatch` when they differ,
+     so a payout with none could never succeed.
+  3. It appended an `admin_account` signer the instruction does not declare.
+     The flow is permissionless; only the transaction's fee payer signs.
+
+  The builder now takes `(mint, shareholders)` and derives the bonding curve,
+  sharing config and creator vault itself. Its account list is asserted
+  against a mainnet payout that paid five shareholders at slot 430_382_254.
+
+- **`transfer_creator_fees_to_pump_instruction` passed the same wrong creator
+  vault**, sending the sweep to a different coin's vault than the one
+  `distribute_creator_fees` draws from. It now derives it.
+
+- `Cargo.lock` pins `five8_core` to 1.0.0. `five8` 1.0.0 requests
+  `five8_core >=0.1.1, <2` and cargo would otherwise select 0.1.2, whose
+  `DecodeError` predates the `core::error::Error` impl that
+  `solana-keypair` 3.1.2 requires — the dependency graph does not compile
+  without the pin.
+
+- **Two advisories cleared out of `Cargo.lock`.** Surfaced by the new
+  `cargo audit` job, both semver-compatible and both transitive:
+  `crossbeam-epoch` 0.9.18 -> 0.9.21 (RUSTSEC-2026-0204, invalid pointer
+  dereference in the `fmt::Pointer` impl for `Atomic` / `Shared`; reached via
+  `rayon` under `solana-streamer`) and `time` 0.3.41 -> 0.3.55
+  (RUSTSEC-2026-0009, denial of service via stack exhaustion; reached via
+  `x509-parser` under `solana-tls-utils`). No manifest requirement changed and
+  the resolved versions are still MSRV-compatible.
+
+- **`POOL_ACCOUNT_NEW_SIZE` corrected from 300 to 301.** Live mainnet pool
+  accounts allocate 301 bytes, not 300 — the three current-layout fixtures in
+  `tests/fixtures/pools/` are all exactly that long. The `extend_account` gate
+  compares `pool_account_data_len < POOL_ACCOUNT_NEW_SIZE`, so the wrong value
+  only mattered for a pool at exactly 300 bytes: it was classified as
+  current-layout and left un-extended. No account of that length is known on
+  mainnet, so no caller-visible behaviour changes. `src/client.rs` gained a
+  test module pinning the gate one byte below the boundary and at it, plus the
+  same decision against the real 271-byte legacy and 301-byte current
+  fixtures.
+
+  The pool decode path is untouched. `PoolInfo::from_account_data` reads
+  `virtual_quote_reserves` at `size_of::<Pool>() + 8` = 245, an offset derived
+  from the `Pool` struct and not from this constant, and still accepts
+  accounts on either side of it; `tests/wire_format.rs` continues to pin
+  `size_of::<Pool>() == 237`.
+
+### Changed
+
+- **`PUMP_CREATOR_VAULT` is deprecated.** It is one coin's creator vault, not
+  a global account; use `util::pump_creator_vault_pda(creator)`.
+
+- **Breaking: `distribute_creator_fees_instruction`,
+  `PumpSwapClient::build_creator_fee_withdraw_ixs` and
+  `PumpSwapClient::withdraw_creator_fees` take fewer arguments.** The bonding
+  curve, sharing config and coin creator were parameters; all three derive
+  from the mint, and passing them separately let a caller pair a mint with
+  another coin's config. `build_creator_fee_withdraw_ixs` is now `async`,
+  because it reads the shareholders from chain.
+
+  ```rust
+  // before
+  client.withdraw_creator_fees(&admin, &coin_creator, &mint, &bonding_curve, &sharing_config).await?;
+  // after
+  client.withdraw_creator_fees(&admin, &mint).await?;
+  ```
+
+- **Dependencies brought up to their latest stable majors.** `solana-client`
+  2.1.5 → 4.3.0, `solana-sdk` 2.1.5 → 4.1.0, `spl-token` 7 → 9,
+  `spl-token-2022` 7 → 11, `spl-associated-token-account` 6 → 8, `bincode`
+  1.3.3 → 2.0.1, `base64` 0.21.7 → 0.23.1, `rand` 0.9 → 0.10.2, `bytemuck`
+  1.20 → 1.25.2. `jito-sdk-rust` was already current at 0.3.2.
+
+  The `solana-sdk` 2.x line has since been split into granular `solana-*`
+  crates, and four items this SDK uses left the monolith. They are now direct
+  dependencies: `ComputeBudgetInstruction` from `solana-compute-budget-interface`,
+  and `system_instruction` / `system_program` from `solana-system-interface`.
+  `CommitmentConfig` (`solana-commitment-config`) and `LAMPORTS_PER_SOL`
+  (`solana-native-token`) moved out too; both are only used by the examples and
+  tests, so they are dev-dependencies.
+
+- **MSRV raised from 1.85 to 1.97.1.** Required by the `solana-client` 4.3.0
+  stack, which declares `rust-version = "1.97.1"` across ~40 crates. This is the
+  highest MSRV in the resolved graph; the build and full test suite are verified
+  against exactly that toolchain. `edition` stays at `2024`.
+
+- **`send_jito_bundle` and the system-instruction decode moved to the `bincode`
+  2 API.** `bincode::serialize` / `deserialize` became
+  `bincode::serde::encode_to_vec` / `decode_from_slice` with
+  `bincode::config::legacy()`, which is the configuration that reproduces
+  bincode 1.3's format (little-endian, fixed-int). Verified byte-for-byte: a
+  signed `Transaction` encodes to the same 260 bytes under bincode 1.3.3 and
+  bincode 2.0.1 `legacy()`. `tests/wire_format.rs` pins that encoding to a
+  golden vector captured from bincode 1.3.3 so a future bump cannot move it
+  silently.
+
+- Example and README amounts that used `solana_sdk::native_token::sol_to_lamports`
+  now derive from `LAMPORTS_PER_SOL` or parse with `sol_str_to_lamports`.
+  `solana-native-token` 3.0 dropped the lossy `f64` converters
+  (`sol_to_lamports` / `lamports_to_sol`). The constants are unchanged:
+  `sol_to_lamports(0.001)` was exactly `1_000_000`.
+
+### Held back
+
+- **`bincode` stays on 2.0.1, not 3.0.0.** bincode 3.0.0 is not a usable
+  release — its entire source is `compile_error!("https://xkcd.com/2347/")`.
+  2.0.1 is the latest version that builds.
+
+- **`solana-sdk` stays on 4.1.0, not 5.0.0.** `solana-sdk` 5.0.0 depends on
+  `solana-transaction` 5.x and `solana-message` 5.x, while the latest stable
+  `solana-client` (4.3.0) is built on the 4.x line. Pairing them puts two
+  incompatible `Transaction` types in the graph and
+  `solana_sdk::transaction::Transaction` stops satisfying the
+  `SerializableTransaction` bound every `send_*` / `simulate_*` call needs.
+  There is no stable `solana-client` 5.x yet (only `4.4.0-alpha.5`).
+  `solana-sdk` 4.1.0 is the newest release whose granular dependencies unify
+  with `solana-client` 4.3.0.
+
 ### Added
 
 - **Volume-accumulator read API.** `UserVolumeAccumulator` and
@@ -38,6 +167,7 @@
   from a real `claim_cashback` transaction; the global fixture records the
   zeroed account as it stands, and the `#[ignore]`d tests are the alarm for
   the day that changes.
+
 - **`SharingConfig` decoding: a coin's creator fees split across several
   addresses by basis points.** New `SharingConfig`, `Shareholder` and
   `ConfigStatus` types with a `SharingConfig::from_account_data` decoder,
@@ -125,135 +255,6 @@
   `find_coin_creator_vault_authority` seeds on `"creator_vault"` with an
   underscore, and the two land on different addresses for the same creator.
 
-### Changed
-
-- **`PUMP_CREATOR_VAULT` is deprecated.** It is one coin's creator vault, not
-  a global account; use `util::pump_creator_vault_pda(creator)`.
-
-- **Breaking: `distribute_creator_fees_instruction`,
-  `PumpSwapClient::build_creator_fee_withdraw_ixs` and
-  `PumpSwapClient::withdraw_creator_fees` take fewer arguments.** The bonding
-  curve, sharing config and coin creator were parameters; all three derive
-  from the mint, and passing them separately let a caller pair a mint with
-  another coin's config. `build_creator_fee_withdraw_ixs` is now `async`,
-  because it reads the shareholders from chain.
-
-  ```rust
-  // before
-  client.withdraw_creator_fees(&admin, &coin_creator, &mint, &bonding_curve, &sharing_config).await?;
-  // after
-  client.withdraw_creator_fees(&admin, &mint).await?;
-  ```
-
-- **Dependencies brought up to their latest stable majors.** `solana-client`
-  2.1.5 → 4.3.0, `solana-sdk` 2.1.5 → 4.1.0, `spl-token` 7 → 9,
-  `spl-token-2022` 7 → 11, `spl-associated-token-account` 6 → 8, `bincode`
-  1.3.3 → 2.0.1, `base64` 0.21.7 → 0.23.1, `rand` 0.9 → 0.10.2, `bytemuck`
-  1.20 → 1.25.2. `jito-sdk-rust` was already current at 0.3.2.
-
-  The `solana-sdk` 2.x line has since been split into granular `solana-*`
-  crates, and four items this SDK uses left the monolith. They are now direct
-  dependencies: `ComputeBudgetInstruction` from `solana-compute-budget-interface`,
-  and `system_instruction` / `system_program` from `solana-system-interface`.
-  `CommitmentConfig` (`solana-commitment-config`) and `LAMPORTS_PER_SOL`
-  (`solana-native-token`) moved out too; both are only used by the examples and
-  tests, so they are dev-dependencies.
-
-- **MSRV raised from 1.85 to 1.97.1.** Required by the `solana-client` 4.3.0
-  stack, which declares `rust-version = "1.97.1"` across ~40 crates. This is the
-  highest MSRV in the resolved graph; the build and full test suite are verified
-  against exactly that toolchain. `edition` stays at `2024`.
-
-- **`send_jito_bundle` and the system-instruction decode moved to the `bincode`
-  2 API.** `bincode::serialize` / `deserialize` became
-  `bincode::serde::encode_to_vec` / `decode_from_slice` with
-  `bincode::config::legacy()`, which is the configuration that reproduces
-  bincode 1.3's format (little-endian, fixed-int). Verified byte-for-byte: a
-  signed `Transaction` encodes to the same 260 bytes under bincode 1.3.3 and
-  bincode 2.0.1 `legacy()`. `tests/wire_format.rs` pins that encoding to a
-  golden vector captured from bincode 1.3.3 so a future bump cannot move it
-  silently.
-
-- Example and README amounts that used `solana_sdk::native_token::sol_to_lamports`
-  now derive from `LAMPORTS_PER_SOL` or parse with `sol_str_to_lamports`.
-  `solana-native-token` 3.0 dropped the lossy `f64` converters
-  (`sol_to_lamports` / `lamports_to_sol`). The constants are unchanged:
-  `sol_to_lamports(0.001)` was exactly `1_000_000`.
-
-### Held back
-
-- **`bincode` stays on 2.0.1, not 3.0.0.** bincode 3.0.0 is not a usable
-  release — its entire source is `compile_error!("https://xkcd.com/2347/")`.
-  2.0.1 is the latest version that builds.
-
-- **`solana-sdk` stays on 4.1.0, not 5.0.0.** `solana-sdk` 5.0.0 depends on
-  `solana-transaction` 5.x and `solana-message` 5.x, while the latest stable
-  `solana-client` (4.3.0) is built on the 4.x line. Pairing them puts two
-  incompatible `Transaction` types in the graph and
-  `solana_sdk::transaction::Transaction` stops satisfying the
-  `SerializableTransaction` bound every `send_*` / `simulate_*` call needs.
-  There is no stable `solana-client` 5.x yet (only `4.4.0-alpha.5`).
-  `solana-sdk` 4.1.0 is the newest release whose granular dependencies unify
-  with `solana-client` 4.3.0.
-
-### Fixed
-
-- **`distribute_creator_fees_instruction` built an instruction the program
-  could not accept.** Three faults, each independently fatal:
-
-  1. It passed the `PUMP_CREATOR_VAULT` constant as the creator vault. The
-     vault is per creator — `["creator-vault", BondingCurve.creator]` — so
-     that address was correct for exactly one coin and failed a seeds
-     constraint for every other.
-  2. It passed no shareholder accounts. The program matches its remaining
-     accounts against the config's shareholders position by position and
-     fails with `ShareholdersAndRemainingAccountsMismatch` when they differ,
-     so a payout with none could never succeed.
-  3. It appended an `admin_account` signer the instruction does not declare.
-     The flow is permissionless; only the transaction's fee payer signs.
-
-  The builder now takes `(mint, shareholders)` and derives the bonding curve,
-  sharing config and creator vault itself. Its account list is asserted
-  against a mainnet payout that paid five shareholders at slot 430_382_254.
-
-- **`transfer_creator_fees_to_pump_instruction` passed the same wrong creator
-  vault**, sending the sweep to a different coin's vault than the one
-  `distribute_creator_fees` draws from. It now derives it.
-
-- `Cargo.lock` pins `five8_core` to 1.0.0. `five8` 1.0.0 requests
-  `five8_core >=0.1.1, <2` and cargo would otherwise select 0.1.2, whose
-  `DecodeError` predates the `core::error::Error` impl that
-  `solana-keypair` 3.1.2 requires — the dependency graph does not compile
-  without the pin.
-
-- **Two advisories cleared out of `Cargo.lock`.** Surfaced by the new
-  `cargo audit` job, both semver-compatible and both transitive:
-  `crossbeam-epoch` 0.9.18 -> 0.9.21 (RUSTSEC-2026-0204, invalid pointer
-  dereference in the `fmt::Pointer` impl for `Atomic` / `Shared`; reached via
-  `rayon` under `solana-streamer`) and `time` 0.3.41 -> 0.3.55
-  (RUSTSEC-2026-0009, denial of service via stack exhaustion; reached via
-  `x509-parser` under `solana-tls-utils`). No manifest requirement changed and
-  the resolved versions are still MSRV-compatible.
-
-- **`POOL_ACCOUNT_NEW_SIZE` corrected from 300 to 301.** Live mainnet pool
-  accounts allocate 301 bytes, not 300 — the three current-layout fixtures in
-  `tests/fixtures/pools/` are all exactly that long. The `extend_account` gate
-  compares `pool_account_data_len < POOL_ACCOUNT_NEW_SIZE`, so the wrong value
-  only mattered for a pool at exactly 300 bytes: it was classified as
-  current-layout and left un-extended. No account of that length is known on
-  mainnet, so no caller-visible behaviour changes. `src/client.rs` gained a
-  test module pinning the gate one byte below the boundary and at it, plus the
-  same decision against the real 271-byte legacy and 301-byte current
-  fixtures.
-
-  The pool decode path is untouched. `PoolInfo::from_account_data` reads
-  `virtual_quote_reserves` at `size_of::<Pool>() + 8` = 245, an offset derived
-  from the `Pool` struct and not from this constant, and still accepts
-  accounts on either side of it; `tests/wire_format.rs` continues to pin
-  `size_of::<Pool>() == 237`.
-
-### Added
-
 - **CI runs `cargo audit`.** A dedicated `audit` job installs `cargo-audit`
   and audits `Cargo.lock` against the RustSec advisory database, so a
   vulnerable transitive dependency fails the build instead of going unnoticed.
@@ -279,6 +280,100 @@
 - `build.log` — two stray lines of `cargo run` output from an old
   `verify_layout` run — is no longer committed, and `.gitignore` gained a
   `*.log` rule so it does not come back.
+
+### Compatibility
+
+- **You cannot take this release on a toolchain older than 1.97.1.** The MSRV
+  moves 1.85 → 1.97.1 and there is no opt-out: the `solana-client` 4.3.0 stack
+  declares `rust-version = "1.97.1"` across ~40 crates, so an older `cargo`
+  refuses the graph outright. If you are pinned below 1.97.1, stay on 0.5.0.
+  `edition` stays at `2024`.
+
+- **`solana-sdk` 2.1.5 → 4.1.0 and `solana-client` 2.1.5 → 4.3.0 — two major
+  versions, and the monolith has since been split.** Any other crate in your
+  graph still on the solana 2.x line will not unify with this one: `Pubkey`,
+  `Keypair` and `Transaction` become distinct types across the two lines and
+  stop satisfying each other's bounds. Upgrade the rest of your solana
+  dependencies in the same step.
+
+  The split also moves items out of `solana-sdk` that your own code may be
+  importing from it. Most relevant: **`CommitmentConfig` is no longer
+  re-exported**, so building the `RpcClient` this SDK takes now needs
+  `solana-commitment-config` as your own direct dependency.
+
+  ```toml
+  # add to your [dependencies]
+  solana-commitment-config = "3.1.1"
+  ```
+
+  ```rust
+  // before
+  use solana_sdk::commitment_config::CommitmentConfig;
+  // after
+  use solana_commitment_config::CommitmentConfig;
+  ```
+
+  `LAMPORTS_PER_SOL` likewise moved to `solana-native-token`, which in 3.0
+  dropped the lossy `f64` converters `sol_to_lamports` / `lamports_to_sol`
+  entirely — parse with `sol_str_to_lamports` or multiply by
+  `LAMPORTS_PER_SOL`. Both crates are dev-dependencies here because only the
+  examples and tests use them; they are yours to declare if your code does.
+
+- **Three creator-fee signatures changed.** All three dropped parameters that
+  are derivable from the mint, because passing them separately let a caller
+  pair a mint with another coin's config. `build_creator_fee_withdraw_ixs` also
+  became `async` — it now reads the shareholders from chain.
+
+  ```rust
+  // before
+  distribute_creator_fees_instruction(&mint, &bonding_curve, &sharing_config, &admin_account)?;
+  client.build_creator_fee_withdraw_ixs(&coin_creator, &mint, &bonding_curve, &sharing_config, &admin)?;
+  client.withdraw_creator_fees(&admin, &coin_creator, &mint, &bonding_curve, &sharing_config).await?;
+
+  // after
+  distribute_creator_fees_instruction(&mint, &shareholders)?;
+  client.build_creator_fee_withdraw_ixs(&mint).await?;
+  client.withdraw_creator_fees(&admin, &mint).await?;
+  ```
+
+  `shareholders` is the active shareholder list from the coin's
+  `SharingConfig`; `PumpSwapClient::fetch_sharing_config` reads it, and the
+  two client methods do that for you.
+
+- **`transfer_creator_fees_to_pump_instruction` keeps its signature but emits
+  a different account.** Position 8 was the `PUMP_CREATOR_VAULT` constant and
+  is now `pump_creator_vault_pda(coin_creator)`. Call sites compile unchanged
+  and the bytes sent on chain change — which is the fix: the old address was
+  correct for one coin and swept every other coin's fees to the wrong vault.
+  If you assert on this instruction's account list, re-record it.
+
+- **`PUMP_CREATOR_VAULT` is deprecated and will warn.** It is one specific
+  creator's vault, not a global account — the vault is
+  `["creator-vault", creator]` under pump.fun. Replace it with
+  `util::pump_creator_vault_pda(creator)`. It still resolves to the same
+  address, so nothing breaks at the call site; the warning is telling you the
+  value was never the one you wanted.
+
+- **The creator-fee payout route changed for pools migrated to a
+  `SharingConfig`.** Such a pool's `coin_creator` is the config, and pump-amm
+  rejects `collect_coin_creator_fee` on it with
+  `CreatorVaultMigratedToSharingConfig`. `PoolInfo::fee_sharing_config()`
+  detects the case, and `build_creator_fee_withdraw_ixs` now composes the
+  `transfer_creator_fees_to_pump` / `distribute_creator_fees` pair instead.
+  Code that assumed one route for every pool needs to branch.
+
+- **`POOL_ACCOUNT_NEW_SIZE` changed value, 300 → 301.** Live pool accounts
+  allocate 301 bytes. If you compare a pool's data length against this
+  constant yourself, your classification of a 300-byte account flips — no such
+  account is known on mainnet, so this is a correction, not an observed
+  behaviour change.
+
+- **Unchanged: the trading path.** Swap and quote math, `PoolInfo` and its
+  fields, pool decoding, instruction layouts, account orders and PDA
+  derivations for buy / sell / deposit / withdraw are all untouched. If you do
+  not call the creator-fee API, this release changes no number you depend on
+  and no byte you send on chain — it is a dependency and MSRV upgrade for you.
+  Everything else listed under **Added** is additive.
 
 ## 0.5.0 - 2026-09-20
 
