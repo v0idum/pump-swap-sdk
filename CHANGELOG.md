@@ -83,6 +83,16 @@
   which lets the program create a shareholder's missing quote ATA.
   `PumpSwapClient::build_creator_fee_withdraw_ixs_v2` composes the pair.
 
+  `transfer_creator_fees_to_pump_v2` is now covered by `#[ignore]`d mainnet
+  simulations in `tests/creator_fee_routing.rs`, which was the outstanding gap
+  when it was added: no live sample of the instruction could be found to
+  transcribe, so its account list rested on the IDL alone. It now simulates
+  with `err: None` against two live coin creators. The WSOL-quote one has no
+  `pump_creator_vault_ata` yet, so the run exercises what `payer` funds — the
+  program creates the ATA and then moves the fees. The other is quoted in a
+  Token-2022 mint, the case v1 cannot express at all, and the program settles
+  it with a `TransferChecked` on Token-2022.
+
 - **`set_coin_creator_instruction` and `migrate_pool_coin_creator_instruction`**,
   the two pump-amm instructions that write a pool's `coin_creator`. Neither
   takes arguments or a signer: both take the pool and its base mint and derive

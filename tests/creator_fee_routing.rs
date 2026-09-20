@@ -43,6 +43,38 @@ const SHAREHOLDERS: [Pubkey; 5] = [
     pubkey!("9fnyojTv8GYHWr4Vaj4tvVL82scPPYYkW1CAXAbfUsdj"),
 ];
 
+/// A second live fee-sharing coin, used where one shareholder is the point.
+/// Its config splits 10_000 bps to a single address, which is also the wallet
+/// that pays for the payout.
+mod single_shareholder {
+    use super::*;
+
+    pub const MINT: Pubkey = pubkey!("57KoEZXm2mJwFqbB7fvcgZmmjc9mivFmKhXA45H3pump");
+    pub const BONDING_CURVE: Pubkey = pubkey!("GE4Mcujd5zYiqWDjRg68CEh67mfX5BsS1VyUWPPsQgCG");
+    pub const SHARING_CONFIG: Pubkey = pubkey!("YezcoBYwhL2V5ZLcPWrbFJQetvjtUXAyNWQmrkxAPgh");
+    pub const PUMP_CREATOR_VAULT: Pubkey = pubkey!("8CoWk2ZYjsBZEy8yLqWEK9mtZ8tkAbAFrbmtyyuhEqGg");
+    pub const VAULT_AUTHORITY: Pubkey = pubkey!("BXdAfYjPKUmmix5zYVdVrkDyPQRAj5ZZDM933cZK9Tad");
+    pub const VAULT_WSOL_ATA: Pubkey = pubkey!("26mpTjY6VebDVFKUUuHN2v2qj2FJy6P9Ui7GvVZSJgRg");
+    /// The config's only shareholder, and the fee payer of the transaction the
+    /// account lists below were transcribed from.
+    pub const SHAREHOLDER: Pubkey = pubkey!("Ao6bNP1o68EzVKy296rR5Jg6iAUUQNU2FA65Wvs7aR2U");
+}
+
+/// A coin creator that is an ordinary wallet rather than a sharing config, on
+/// a pool quoted in a Token-2022 mint — `fixtures/pools/pool_non_sol_quote_pump.bin`.
+/// This is the case v1 cannot express at all.
+mod token_2022_quote {
+    use super::*;
+
+    pub const COIN_CREATOR: Pubkey = pubkey!("CwFVCjUVG8s1rf7YJMZX8sy4sgnoePCDGk1uEnCTeEVQ");
+    pub const QUOTE_MINT: Pubkey = pubkey!("TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo");
+    pub const VAULT_AUTHORITY: Pubkey = pubkey!("9RbdpSXdJkKvSTdNJUvJDrqVMRBa7X5v3hrz2y5CmNE");
+    pub const VAULT_ATA: Pubkey = pubkey!("398HozNLoJDk8ShrY8rJaECrogsQgLS68akPqDNQun1Q");
+    pub const PUMP_CREATOR_VAULT: Pubkey = pubkey!("AKGFkTrBYW7hdAvsF8H4egADvMQuNw5TpKk97xc7jyG1");
+    pub const PUMP_CREATOR_VAULT_ATA: Pubkey =
+        pubkey!("FgrfbN61FNvQYBSbVFCD6XpFMhWmbQogHRvZYgrGaCZV");
+}
+
 const SYSTEM_PROGRAM: Pubkey = pubkey!("11111111111111111111111111111111");
 const ASSOCIATED_TOKEN_PROGRAM: Pubkey = pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
@@ -246,6 +278,110 @@ fn transfer_creator_fees_to_pump_v2_adds_a_payer_and_the_vault_ata() {
     );
 }
 
+/// The whole v1 route for a second coin, transcribed from mainnet tx
+/// `2pEn4Dstb24ZeQFuEBwFM712yM9aBaHbjqBsWV7SQZ4bdLkXdn6R6LGt3rZSCRsFCSQ6AnhRu477pUpnKDHVyrf3`
+/// (slot 447_481_503) — the sweep leg, ten accounts, none of them signing.
+#[test]
+fn transfer_creator_fees_to_pump_matches_a_live_sweep() {
+    use single_shareholder::*;
+
+    let ix = transfer_creator_fees_to_pump_instruction(&SHARING_CONFIG).expect("builds");
+
+    assert_eq!(ix.program_id, PUMP_SWAP_PROGRAM_ID);
+    assert_eq!(ix.data, vec![139, 52, 134, 85, 228, 229, 108, 241]);
+    assert_eq!(
+        metas(&ix),
+        vec![
+            (WRAPPED_SOL_MINT, false, false),
+            (spl_token::ID, false, false),
+            (SYSTEM_PROGRAM, false, false),
+            (ASSOCIATED_TOKEN_PROGRAM, false, false),
+            (SHARING_CONFIG, false, false),
+            (VAULT_AUTHORITY, true, false),
+            (VAULT_WSOL_ATA, true, false),
+            (PUMP_CREATOR_VAULT, true, false),
+            (pump_swap_sdk::EVENT_AUTHORITY, false, false),
+            (PUMP_SWAP_PROGRAM_ID, false, false),
+        ]
+    );
+}
+
+/// The payout leg of the same transaction. One shareholder, so the account
+/// list is the fixed seven plus one remaining account.
+///
+/// In the recorded transaction that last account also carries the signer flag,
+/// because the shareholder happens to be the transaction's fee payer — a
+/// message-level flag, not something `distribute_creator_fees` declares. The
+/// instruction has no signer of its own, and the builder marks none.
+#[test]
+fn distribute_creator_fees_matches_a_single_shareholder_payout() {
+    use single_shareholder::*;
+
+    let ix = distribute_creator_fees_instruction(&MINT, &[SHAREHOLDER]).expect("builds");
+
+    assert_eq!(ix.program_id, PUMPFUN_PROGRAM);
+    assert_eq!(ix.data, vec![165, 114, 103, 0, 121, 206, 247, 81]);
+    assert_eq!(
+        metas(&ix),
+        vec![
+            (MINT, false, false),
+            (BONDING_CURVE, false, false),
+            (SHARING_CONFIG, false, false),
+            (PUMP_CREATOR_VAULT, true, false),
+            (SYSTEM_PROGRAM, false, false),
+            (PUMPFUN_EVENT_AUTHORITY, false, false),
+            (PUMPFUN_PROGRAM, false, false),
+            (SHAREHOLDER, true, false),
+        ]
+    );
+    assert!(ix.accounts.iter().all(|m| !m.is_signer));
+}
+
+/// Why v2 exists: `quote_mint` is a real input, so a Token-2022 quote resolves
+/// a different vault ATA and a pump-side token account that v1 has no slot for
+/// at all. Both addresses are live on mainnet.
+#[test]
+fn transfer_creator_fees_to_pump_v2_resolves_a_token_2022_quote() {
+    use token_2022_quote::*;
+
+    let payer = Pubkey::new_unique();
+    let ix = transfer_creator_fees_to_pump_v2_instruction(
+        &payer,
+        &COIN_CREATOR,
+        &QUOTE_MINT,
+        &spl_token_2022::ID,
+    )
+    .expect("builds");
+
+    assert_eq!(
+        metas(&ix),
+        vec![
+            (payer, true, true),
+            (QUOTE_MINT, false, false),
+            (spl_token_2022::ID, false, false),
+            (SYSTEM_PROGRAM, false, false),
+            (ASSOCIATED_TOKEN_PROGRAM, false, false),
+            (COIN_CREATOR, false, false),
+            (VAULT_AUTHORITY, true, false),
+            (VAULT_ATA, true, false),
+            (PUMP_CREATOR_VAULT, true, false),
+            (PUMP_CREATOR_VAULT_ATA, true, false),
+            (pump_swap_sdk::EVENT_AUTHORITY, false, false),
+            (PUMP_SWAP_PROGRAM_ID, false, false),
+        ]
+    );
+
+    // v1 is pinned to WSOL and cannot address this pool's quote mint, nor the
+    // pump-side token account the fees have to land in.
+    let v1 = transfer_creator_fees_to_pump_instruction(&COIN_CREATOR).expect("builds");
+    let v1_keys: Vec<Pubkey> = v1.accounts.iter().map(|m| m.pubkey).collect();
+    assert!(!v1_keys.contains(&QUOTE_MINT));
+    assert!(!v1_keys.contains(&PUMP_CREATOR_VAULT_ATA));
+
+    // Two creators never share a pump creator vault.
+    assert_ne!(PUMP_CREATOR_VAULT, single_shareholder::PUMP_CREATOR_VAULT);
+}
+
 mod pool_detection {
     use super::*;
     use pump_swap_sdk::{PoolInfo, TokenSide};
@@ -331,16 +467,141 @@ mod live {
     use super::*;
     use pump_swap_sdk::PumpSwapClient;
     use solana_client::nonblocking::rpc_client::RpcClient;
+    use solana_client::rpc_config::RpcSimulateTransactionConfig;
     use solana_commitment_config::CommitmentConfig;
+    use solana_sdk::message::Message;
+    use solana_sdk::transaction::Transaction;
     use std::sync::Arc;
 
+    fn rpc_url() -> String {
+        std::env::var("RPC_URL")
+            .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string())
+    }
+
     fn client() -> PumpSwapClient<Arc<RpcClient>> {
-        let url = std::env::var("RPC_URL")
-            .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
         PumpSwapClient::new(Arc::new(RpcClient::new_with_commitment(
-            url,
+            rpc_url(),
             CommitmentConfig::confirmed(),
         )))
+    }
+
+    /// A funded mainnet wallet that already runs this flow: it is the sole
+    /// shareholder of `single_shareholder::MINT` and paid for the recorded
+    /// payout. Simulation only reads its lamport balance — nothing is signed
+    /// or submitted.
+    const PAYER: Pubkey = single_shareholder::SHAREHOLDER;
+
+    /// Simulate `ix` on mainnet with signature verification off. Returns the
+    /// simulation error, if any, and the program logs.
+    async fn simulate(ix: Instruction) -> (Option<String>, Vec<String>) {
+        let tx = Transaction::new_unsigned(Message::new(&[ix], Some(&PAYER)));
+        let result = RpcClient::new_with_commitment(rpc_url(), CommitmentConfig::confirmed())
+            .simulate_transaction_with_config(
+                &tx,
+                RpcSimulateTransactionConfig {
+                    sig_verify: false,
+                    replace_recent_blockhash: true,
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("simulate")
+            .value;
+
+        (
+            result.err.map(|e| format!("{e:?}")),
+            result.logs.unwrap_or_default(),
+        )
+    }
+
+    /// The sweep the SDK builds is accepted by the program as-is: no error,
+    /// and the v2 handler is reached rather than the transaction bouncing off
+    /// account resolution. `expect_log` additionally pins a CPI the run has to
+    /// make.
+    async fn assert_v2_simulates_clean(
+        coin_creator: &Pubkey,
+        quote_mint: &Pubkey,
+        quote_token_program: &Pubkey,
+        expect_log: &str,
+    ) {
+        let ix = transfer_creator_fees_to_pump_v2_instruction(
+            &PAYER,
+            coin_creator,
+            quote_mint,
+            quote_token_program,
+        )
+        .expect("builds");
+
+        let (err, logs) = simulate(ix).await;
+        assert!(
+            err.is_none(),
+            "simulation failed: {}\n{}",
+            err.unwrap_or_default(),
+            logs.join("\n")
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("TransferCreatorFeesToPumpV2")),
+            "program did not reach the v2 handler:\n{}",
+            logs.join("\n")
+        );
+        assert!(
+            logs.iter().any(|l| l.contains(expect_log)),
+            "expected {expect_log:?} in the logs:\n{}",
+            logs.join("\n")
+        );
+    }
+
+    /// v2 against a WSOL-quote creator whose vault has fees accrued. This
+    /// creator's `pump_creator_vault_ata` does not exist yet, so the run also
+    /// exercises what `payer` is for: the program creates the ATA through the
+    /// associated-token program before moving the fees.
+    #[tokio::test]
+    #[ignore = "hits mainnet RPC"]
+    async fn live_transfer_creator_fees_to_pump_v2_simulates_for_a_wsol_creator() {
+        assert_v2_simulates_clean(
+            &single_shareholder::SHARING_CONFIG,
+            &WRAPPED_SOL_MINT,
+            &spl_token::ID,
+            "Initialize the associated token account",
+        )
+        .await;
+    }
+
+    /// The same instruction for a pool quoted in a Token-2022 mint — the case
+    /// v1 cannot express at all, and the reason v2 carries a
+    /// `pump_creator_vault_ata`. Here the ATA already exists and the program
+    /// moves the fees with a `TransferChecked` on Token-2022, which is the
+    /// proof that the quote-token path works end to end rather than merely
+    /// resolving.
+    #[tokio::test]
+    #[ignore = "hits mainnet RPC"]
+    async fn live_transfer_creator_fees_to_pump_v2_simulates_for_a_token_2022_quote() {
+        assert_v2_simulates_clean(
+            &token_2022_quote::COIN_CREATOR,
+            &token_2022_quote::QUOTE_MINT,
+            &spl_token_2022::ID,
+            "Instruction: TransferChecked",
+        )
+        .await;
+    }
+
+    /// v1 is narrower, not dead: it still resolves and runs for a WSOL-quote
+    /// pool.
+    #[tokio::test]
+    #[ignore = "hits mainnet RPC"]
+    async fn live_transfer_creator_fees_to_pump_simulates_for_a_wsol_creator() {
+        let ix = transfer_creator_fees_to_pump_instruction(&single_shareholder::SHARING_CONFIG)
+            .expect("builds");
+
+        let (err, logs) = simulate(ix).await;
+        assert!(
+            err.is_none(),
+            "simulation failed: {}\n{}",
+            err.unwrap_or_default(),
+            logs.join("\n")
+        );
     }
 
     /// The composed payout must reproduce, from the mint alone, the exact
