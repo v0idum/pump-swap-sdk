@@ -7,7 +7,8 @@ use crate::util::{
     bonding_curve_pda, calc_lp_mint_pda, calc_user_pool_token_account, fee_config_pda,
     find_coin_creator_vault_ata, find_coin_creator_vault_authority, find_user_vol_accumulator,
     pick_buyback_fee_recipient, pick_protocol_fee_recipient_for_pool, pool_v2_pda,
-    pump_creator_vault_pda, sharing_config_pda, user_volume_accumulator_quote_ata,
+    pump_creator_vault_pda, sharing_config_pda, token_metadata_pda,
+    user_volume_accumulator_quote_ata,
 };
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
@@ -823,6 +824,78 @@ pub fn withdraw_instruction(
         program_id: PUMP_SWAP_PROGRAM_ID,
         accounts,
         data,
+    })
+}
+
+/// Build the pump-amm `migrate_pool_coin_creator` instruction — repoints an
+/// existing pool's `coin_creator` at the coin's fee-sharing config, so creator
+/// fees accrue to the split rather than to the original creator wallet.
+///
+/// Takes no arguments. `sharing_config` is [`sharing_config_pda`] of the
+/// pool's **base mint**, and the program derives the same address itself, so
+/// the account must exist — a coin with no split cannot be migrated.
+///
+/// `pool` is checked against `["pool", pool.index, pool.creator,
+/// pool.base_mint, pool.quote_mint]`;
+/// [`calc_pool_pda_with_index`](crate::util::calc_pool_pda_with_index)
+/// derives it when the pool address is not already at hand.
+///
+/// Afterwards the pool's fees leave through
+/// [`transfer_creator_fees_to_pump_instruction`] rather than
+/// `collect_coin_creator_fee`, which pump-amm rejects for a migrated pool with
+/// `CreatorVaultMigratedToSharingConfig`. See
+/// [`PoolInfo::fee_sharing_config`] for detecting one.
+///
+/// 4 accounts, discriminator `[208, 8, 159, 4, 74, 175, 16, 58]`.
+pub fn migrate_pool_coin_creator_instruction(
+    pool: &Pubkey,
+    base_mint: &Pubkey,
+) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new(*pool, false),
+        AccountMeta::new_readonly(sharing_config_pda(base_mint), false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![208, 8, 159, 4, 74, 175, 16, 58],
+    })
+}
+
+/// Build the pump-amm `set_coin_creator` instruction — backfills the
+/// `coin_creator` of a pool created before that field was populated, reading
+/// the authoritative value from the base mint's pump.fun bonding curve and its
+/// Metaplex metadata account.
+///
+/// Takes no arguments and no signer: the program resolves the creator itself,
+/// so anyone can run it. A pool that still needs it has
+/// `coin_creator == Pubkey::default()` and must be a pump.fun graduation —
+/// anything else is rejected with `OnlyCanonicalPumpPoolsCanHaveCoinCreator`.
+///
+/// Both derived accounts come from the pool's **base mint** —
+/// [`token_metadata_pda`] and [`bonding_curve_pda`] — and both must exist. The
+/// metadata account is the constraint in practice: pump.fun coins issued on
+/// Token-2022 carry their metadata as a mint extension and have no Metaplex
+/// account, but those postdate the `coin_creator` field and so are not the
+/// population this instruction backfills.
+///
+/// 5 accounts, discriminator `[210, 149, 128, 45, 188, 58, 78, 175]`.
+pub fn set_coin_creator_instruction(pool: &Pubkey, base_mint: &Pubkey) -> Result<Instruction> {
+    let accounts = vec![
+        AccountMeta::new(*pool, false),
+        AccountMeta::new_readonly(token_metadata_pda(base_mint), false),
+        AccountMeta::new_readonly(bonding_curve_pda(base_mint), false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![210, 149, 128, 45, 188, 58, 78, 175],
     })
 }
 

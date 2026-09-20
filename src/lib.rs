@@ -48,7 +48,7 @@ pub use constants::PUMP_CREATOR_VAULT;
 pub use constants::{
     BUYBACK_FEE_RECIPIENTS, EVENT_AUTHORITY, FEE_PROGRAM, GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR,
     POOL_ACCOUNT_NEW_SIZE, PROTOCOL_FEE_RECIPIENTS, PUMP_SWAP_PROGRAM_ID, PUMPFUN_EVENT_AUTHORITY,
-    PUMPFUN_PROGRAM, RESERVED_FEE_RECIPIENTS, WRAPPED_SOL_MINT,
+    PUMPFUN_PROGRAM, RESERVED_FEE_RECIPIENTS, TOKEN_METADATA_PROGRAM, WRAPPED_SOL_MINT,
 };
 pub use instruction::{
     BuyExactQuoteInInstruction, BuyInstruction, ClaimCashbackInstruction, CreatePoolInstruction,
@@ -59,7 +59,8 @@ pub use instruction::{
     make_close_user_volume_accumulator_instruction, make_collect_coin_creator_fee_instruction,
     make_deposit_instruction, make_extend_account_instruction,
     make_init_user_volume_accumulator_instruction, make_sell_instruction,
-    make_sync_user_volume_accumulator_instruction, transfer_creator_fees_to_pump_instruction,
+    make_sync_user_volume_accumulator_instruction, migrate_pool_coin_creator_instruction,
+    set_coin_creator_instruction, transfer_creator_fees_to_pump_instruction,
     transfer_creator_fees_to_pump_v2_instruction, withdraw_instruction,
 };
 pub use math::{
@@ -79,5 +80,5 @@ pub use util::{
     load_pool_with_token_program, pick_buyback_fee_recipient, pick_protocol_fee_recipient,
     pick_protocol_fee_recipient_for_pool, pick_reserved_fee_recipient, pool_v2_pda,
     pump_creator_vault_pda, send_bundle_with_retry, send_jito_bundle, sharing_config_pda,
-    user_volume_accumulator_quote_ata,
+    token_metadata_pda, user_volume_accumulator_quote_ata,
 };

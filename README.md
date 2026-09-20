@@ -386,6 +386,14 @@ cargo doc --open
   `transfer_creator_fees_to_pump_instruction` (+`_v2`),
   `distribute_creator_fees_instruction` (+`_v2`): additional pump-amm and
   pump.fun instruction builders.
+- `set_coin_creator_instruction`, `migrate_pool_coin_creator_instruction`:
+  the two pump-amm instructions that write a pool's `coin_creator`. Both take
+  the pool and its base mint, derive the rest, and are permissionless.
+  `set_coin_creator` backfills the field on a canonical pump pool created
+  before it was populated, reading the coin's pump.fun bonding curve and its
+  Metaplex metadata account; `migrate_pool_coin_creator` repoints it at the
+  coin's `SharingConfig`, after which the pool's fees route through
+  `transfer_creator_fees_to_pump` rather than `collect_coin_creator_fee`.
 - `load_pool`, `load_pool_with_token_program`: pool account decoding helpers.
 - `GlobalConfig`, `FeeConfig`, `Fees`, `FeeTier`: decoded on-chain fee state.
   `GlobalConfig::from_account_data` and `FeeConfig::from_account_data` decode
