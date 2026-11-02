@@ -5,7 +5,7 @@
 //! Everything but the mint is derived: the coin creator is the coin's
 //! [`sharing_config_pda`], and the shareholders are read from that config.
 //! A coin whose fees go to a single creator is not this flow — collect those
-//! with `PumpSwapClient::build_collect_coin_creator_fee_ixs`.
+//! with `PumpSwapClient::build_collect_pool_creator_fee_ixs`.
 //!
 //! Demonstrates: [`PumpSwapClient::withdraw_creator_fees`] and the
 //! [`find_coin_creator_vault_authority`] helper.

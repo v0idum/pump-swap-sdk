@@ -311,6 +311,11 @@ fn buy_exact_base_out_matches_the_program() {
     assert_eq!(quote.max_quote_in, event.user_quote_amount_in);
 }
 
+/// Raw pool account for `6GbDU4VCq5EFZ62EbeKR7RcTegoAZLaiuB4JQ3CGve6k` at slot
+/// 464_561_346: a boosted pool with fees kept by v2 trades waiting. Its boost
+/// of 17_584_505_288 is `virtual_quote_reserves + protocol_fees + creator_fees`.
+const POOL_FEES_WAITING: &[u8] = include_bytes!("fixtures/pools/pool_fees_waiting.bin");
+
 /// Raw pool account for `3MtkgTLjpeisDEszY1WLAGLj5nS7yWWz9KE3mnjj7Krj`,
 /// 301 bytes, carrying virtual quote liquidity.
 const POOL_VIRTUAL: &[u8] = include_bytes!("fixtures/pools/pool_virtual_quote_reserves.bin");
@@ -357,6 +362,45 @@ fn effective_reserves_add_virtual_liquidity_to_the_quote_side_only() {
     assert_eq!(sol_base.virtual_quote_reserves, 0);
     assert_eq!(sol_base.effective_reserves(1_000, 2_000), (1_000, 2_000));
     assert!(sol_base.sol_is_base());
+}
+
+#[test]
+fn pool_decoding_reads_the_fees_waiting_for_a_sweep() {
+    let pool = decode_pool(POOL_FEES_WAITING);
+    assert_eq!(pool.protocol_fees, 9);
+    assert_eq!(pool.creator_fees, 6);
+    assert_eq!(pool.virtual_quote_reserves, 17_584_505_273);
+    assert_eq!(pool.creator_fee_bps, 0);
+    assert!(!pool.is_holder_reward);
+}
+
+/// `creator_fee_bps` at 261, `can_edit_creator_fee` at 269, then
+/// `is_holder_reward` at 270.
+#[test]
+fn pool_decoding_reads_the_custom_creator_fee_and_holder_reward_flag() {
+    let mut data = POOL_FEES_WAITING.to_vec();
+    data[261..269].copy_from_slice(&250u64.to_le_bytes());
+    data[270] = 1;
+    let pool = decode_pool(&data);
+    assert_eq!(pool.creator_fee_bps, 250);
+    assert!(pool.is_holder_reward);
+}
+
+/// Accounts written before these fields were appended read them as zero, even
+/// when the account ends partway through one.
+#[test]
+fn pool_decoding_treats_missing_trailing_fields_as_zero() {
+    let pool = decode_pool(POOL_LEGACY);
+    assert_eq!(pool.creator_fee_bps, 0);
+    assert!(!pool.is_holder_reward);
+    assert_eq!(pool.protocol_fees, 0);
+    assert_eq!(pool.creator_fees, 0);
+
+    let mut data = POOL_FEES_WAITING.to_vec();
+    data.truncate(283);
+    let pool = decode_pool(&data);
+    assert_eq!(pool.protocol_fees, 9);
+    assert_eq!(pool.creator_fees, 0);
 }
 
 /// A real pool account with its `i128` at offset 245 replaced, since no
@@ -563,6 +607,29 @@ mod live {
             quote.min_amount_out,
             result.value.err.map(|err| format!("{err:?}")),
         )
+    }
+
+    /// A quote must not depend on how old the caller's `PoolInfo` is: the
+    /// reserve adjustment moves on every v2 trade and sweep.
+    #[tokio::test]
+    #[ignore = "hits mainnet RPC"]
+    async fn a_held_pool_info_is_refreshed_when_quoting() {
+        let pool = solana_sdk::pubkey!("6GbDU4VCq5EFZ62EbeKR7RcTegoAZLaiuB4JQ3CGve6k");
+        let client = client();
+        let fresh = client.load_pool(&pool).await.expect("loads");
+        let mut stale = fresh.clone();
+        stale.virtual_quote_reserves -= 1_000_000_000_000;
+
+        let (refreshed, (_, quote_reserve)) =
+            client.fetch_pool_snapshot(&stale).await.expect("snapshot");
+
+        assert!(quote_reserve > 0);
+        assert_ne!(
+            refreshed.virtual_quote_reserves,
+            stale.virtual_quote_reserves
+        );
+        assert_eq!(refreshed.pool, pool);
+        assert_eq!(refreshed.quote_token_program, stale.quote_token_program);
     }
 
     #[tokio::test]

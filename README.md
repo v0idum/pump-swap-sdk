@@ -102,7 +102,8 @@ async fn main() -> anyhow::Result<()> {
     let client = PumpSwapClient::new(rpc);
 
     let pool_info = client.load_pool(&pool).await?;
-    let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
+    let (pool_info, (base_vault, quote_vault)) = client.fetch_pool_snapshot(&pool_info).await?;
+    let (base_reserve, quote_reserve) = pool_info.effective_reserves(base_vault, quote_vault);
 
     println!("base_mint:  {}", pool_info.base_mint);
     println!("quote_mint: {}", pool_info.quote_mint);
@@ -229,7 +230,8 @@ floor it will accept. Three things the raw constant product misses:
   when fees kept by v2 trades are waiting in the vault.
   `PoolInfo::virtual_quote_reserves` exposes it and `effective_reserves` applies
   it; a pool carrying it is mispriced without it. It changes on every v2 trade
-  and sweep, so reload a `PoolInfo` you hold across trades.
+  and sweep, so read it together with the vault balances using
+  `fetch_pool_snapshot`. The SDK's own quotes and trades do this.
 
 Fee schedule and pricing rules are pinned by `tests/swap_math.rs`, which
 replays byte-for-byte mainnet swap events through this math offline. The
@@ -396,6 +398,8 @@ cargo doc --open
   coin's `SharingConfig`, after which the pool's fees route through
   `transfer_creator_fees_to_pump` rather than `collect_coin_creator_fee`.
 - `load_pool`, `load_pool_with_token_program`: pool account decoding helpers.
+- `PumpSwapClient::fetch_pool_snapshot`: reads a pool and its vaults in one RPC
+  call. Use it before pricing; `fetch_pool_reserves` returns balances only.
 - `GlobalConfig`, `FeeConfig`, `Fees`, `FeeTier`: decoded on-chain fee state.
   `GlobalConfig::from_account_data` and `FeeConfig::from_account_data` decode
   raw account bytes; `PumpSwapClient::fetch_global_config`,
@@ -423,11 +427,19 @@ cargo doc --open
   `build_creator_fee_withdraw_ixs_v2` for a non-wSOL quote). The payout's
   remaining accounts must be the config's shareholders, in stored order; both
   helpers read them from chain.
+- `sweep_pool_creator_fee_instruction`,
+  `sweep_bonding_curve_creator_fee_instruction`: pay out creator fees that v2
+  trades kept in a pool or on a curve. A fee reaches the creator's vault only
+  through a sweep, and pump.fun refuses a payout while one is waiting on the
+  curve. The `build_creator_fee_withdraw_ixs` helpers add the sweeps they need,
+  and `build_collect_pool_creator_fee_ixs` does the same for a single creator.
+  A payout to 10 shareholders with both sweeps does not fit one transaction, so
+  send `build_creator_fee_sweep_ixs` first in that case.
 - `calc_amount_out`, `buy_amount_out`, `sell_amount_out`: quote math helpers.
 - PDA helpers such as `calc_pool_pda`, `calc_lp_mint_pda`,
   `find_coin_creator_vault_authority`, `find_coin_creator_vault_ata`,
   `find_user_vol_accumulator`, `fee_config_pda`, `sharing_config_pda`,
-  `bonding_curve_pda`, and `pump_creator_vault_pda`.
+  `bonding_curve_pda`, `pump_creator_vault_pda`, and `canonical_pool_pda`.
 - `JitoPool`, `send_jito_bundle`, `send_bundle_with_retry`: Jito bundle
   helpers.
 

@@ -400,6 +400,10 @@ mod pool_detection {
             is_mayhem_mode: false,
             is_cashback_coin: false,
             virtual_quote_reserves: 0,
+            creator_fee_bps: 0,
+            is_holder_reward: false,
+            protocol_fees: 0,
+            creator_fees: 0,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
         }
@@ -469,6 +473,7 @@ mod live {
     use solana_client::nonblocking::rpc_client::RpcClient;
     use solana_client::rpc_config::RpcSimulateTransactionConfig;
     use solana_commitment_config::CommitmentConfig;
+    use solana_compute_budget_interface::ComputeBudgetInstruction;
     use solana_sdk::message::Message;
     use solana_sdk::transaction::Transaction;
     use std::sync::Arc;
@@ -611,15 +616,65 @@ mod live {
     #[ignore = "hits mainnet RPC"]
     async fn live_withdraw_ixs_reproduce_the_recorded_payout() {
         let ixs = client()
-            .build_creator_fee_withdraw_ixs(&MINT)
+            .build_creator_fee_withdraw_ixs(&PAYER, &MINT)
             .await
             .expect("builds");
 
-        assert_eq!(ixs.len(), 2);
-        assert_eq!(ixs[0].program_id, PUMP_SWAP_PROGRAM_ID);
+        // This coin is still on its curve: curve sweep, transfer, payout.
+        let programs: Vec<_> = ixs.iter().map(|ix| ix.program_id).collect();
         assert_eq!(
-            metas(&ixs[1]),
+            programs,
+            [PUMPFUN_PROGRAM, PUMP_SWAP_PROGRAM_ID, PUMPFUN_PROGRAM]
+        );
+        assert_eq!(
+            metas(ixs.last().expect("payout")),
             metas(&distribute_creator_fees_instruction(&MINT, &SHAREHOLDERS).expect("builds"))
+        );
+    }
+
+    /// The whole payout, in one transaction as `withdraw_creator_fees` sends
+    /// it. The vault may hold too little to pay out at any given moment, so
+    /// what this pins is that the sweeps all run and the payout is not refused
+    /// for a fee still waiting.
+    #[tokio::test]
+    #[ignore = "hits mainnet RPC"]
+    async fn live_full_payout_is_not_refused_for_an_unswept_fee() {
+        let built = client()
+            .build_creator_fee_withdraw_ixs(&PAYER, &single_shareholder::MINT)
+            .await
+            .expect("builds");
+        // This coin has graduated with nothing left on its curve: pool sweep,
+        // transfer, payout.
+        let programs: Vec<_> = built.iter().map(|ix| ix.program_id).collect();
+        assert_eq!(
+            programs,
+            [PUMP_SWAP_PROGRAM_ID, PUMP_SWAP_PROGRAM_ID, PUMPFUN_PROGRAM]
+        );
+        let mut ixs = vec![ComputeBudgetInstruction::set_compute_unit_limit(500_000)];
+        ixs.extend(built);
+        let tx = Transaction::new_unsigned(Message::new(&ixs, Some(&PAYER)));
+        let result = RpcClient::new_with_commitment(rpc_url(), CommitmentConfig::confirmed())
+            .simulate_transaction_with_config(
+                &tx,
+                RpcSimulateTransactionConfig {
+                    sig_verify: false,
+                    replace_recent_blockhash: true,
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("simulate")
+            .value;
+        let logs = result.logs.unwrap_or_default().join("\n");
+        println!(
+            "err={:?} cu={:?}\n{logs}",
+            result.err, result.units_consumed
+        );
+        assert!(!logs.contains("CreatorFeesNotSwept"), "{logs}");
+        assert!(
+            logs.contains("Instruction: DistributeCreatorFees"),
+            "payout was not reached:\n{logs}"
         );
     }
 
@@ -629,7 +684,7 @@ mod live {
     #[ignore = "hits mainnet RPC"]
     async fn live_withdraw_ixs_reject_a_coin_without_a_split() {
         let err = client()
-            .build_creator_fee_withdraw_ixs(&Pubkey::new_unique())
+            .build_creator_fee_withdraw_ixs(&PAYER, &Pubkey::new_unique())
             .await
             .expect_err("no sharing config");
         assert!(

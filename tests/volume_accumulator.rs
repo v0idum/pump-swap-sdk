@@ -232,6 +232,11 @@ mod live {
         )))
     }
 
+    /// A trader seen with an accumulator on 2026-11-02. Owners can close these
+    /// accounts, as `FIXTURE_USER` has, so replace this if the test starts
+    /// reporting that the account is gone.
+    const LIVE_USER: Pubkey = pubkey!("8zMuLt43vkGgjkBvAxCo4zX1Ze87Y6ARsAagK75Fwnf7");
+
     #[tokio::test]
     #[ignore = "hits mainnet RPC"]
     async fn live_global_volume_accumulator_decodes() {
@@ -248,12 +253,12 @@ mod live {
     #[ignore = "hits mainnet RPC"]
     async fn live_user_volume_accumulator_decodes() {
         let accumulator = client()
-            .fetch_user_volume_accumulator(&FIXTURE_USER)
+            .fetch_user_volume_accumulator(&LIVE_USER)
             .await
             .expect("fetch user volume accumulator")
-            .expect("fixture user has an accumulator");
+            .expect("user still has an accumulator");
 
-        assert_eq!(accumulator.user, FIXTURE_USER);
+        assert_eq!(accumulator.user, LIVE_USER);
     }
 
     /// The case the API exists for: a user who has never traded has no PDA,

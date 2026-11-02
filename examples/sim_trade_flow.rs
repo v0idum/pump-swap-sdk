@@ -44,7 +44,8 @@ async fn main() -> Result<()> {
 
     let client = PumpSwapClient::new(Arc::clone(&rpc));
     let pool_info = client.load_pool(&pool_pubkey).await?;
-    let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
+    let (pool_info, (base_vault, quote_vault)) = client.fetch_pool_snapshot(&pool_info).await?;
+    let (base_reserve, quote_reserve) = pool_info.effective_reserves(base_vault, quote_vault);
     let (sol_reserve, token_reserve) = pool_info.orient_reserves(base_reserve, quote_reserve);
     println!(
         "pool: sol_is_base={} token_mint={} sol_reserve={} token_reserve={}",

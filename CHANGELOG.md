@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Creator-fee payouts did not account for fees kept by v2 trades.** v2 trades
+  leave the creator fee in the pool or on the curve until a sweep moves it.
+  pump.fun rejects `distribute_creator_fees` with `CreatorFeesNotSwept` while a
+  fee is waiting on the curve, and a sweepless transfer or collect leaves what
+  is waiting behind. `build_creator_fee_withdraw_ixs`, its `_v2` form and
+  `withdraw_creator_fees` now add the sweeps they need.
+
+  A coin on its curve gets a curve sweep. A graduated coin gets a pool sweep,
+  plus a curve sweep only if a fee is left there. A curve that can no longer
+  trade cannot gain a fee, and skipping that sweep is what lets a payout to 10
+  shareholders fit one transaction. With both sweeps it does not, so send
+  `build_creator_fee_sweep_ixs` in its own transaction first in that case.
+
+- **Quotes and trades priced a held `PoolInfo` against current vault balances.**
+  `virtual_quote_reserves` moves with the vault on every v2 trade and sweep, so
+  an old `PoolInfo` counted fees waiting in the vault as liquidity. The client's
+  quotes, `buy`, `sell`, `simulate_buy` and `simulate_sell` now re-read the pool
+  and vaults together in one RPC call. The `batch_buy`, `verify_layout` and `sim_trade_flow`
+  examples priced against the raw vault balance; they now use effective reserves.
+
+- `live_user_volume_accumulator_decodes` now reads an account that still exists.
+  Its previous user had closed theirs.
+
+### Added
+
+- `sweep_pool_creator_fee_instruction` and
+  `sweep_bonding_curve_creator_fee_instruction`. The pool sweep's account list is
+  asserted against mainnet transaction
+  `4ZRFhEwSaA3bc9Q3wBUt399uE5o7r4F2uGX22WKX2ApP89RDk5mer51bWZFJBa3YpprPbFL4UbDkyP1AR6L8QXCj`.
+  No recorded curve sweep was found; that one is asserted against the IDL and
+  simulated on mainnet.
+- `PumpSwapClient::build_collect_pool_creator_fee_ixs` sweeps a pool, then
+  collects, and refuses a fee-sharing pool.
+- `PumpSwapClient::build_creator_fee_sweep_ixs` and `fetch_pool_snapshot`.
+- `PoolInfo` fields `creator_fee_bps`, `is_holder_reward`, `protocol_fees` and
+  `creator_fees`. Quoting does not need `creator_fee_bps`: it applies only to
+  pairs that `can_quote_fees` already refuses.
+- `state::bonding_curve_creator_fee`, `util::canonical_pool_pda`,
+  `util::pump_pool_authority_pda` and `PUMPFUN_GLOBAL`.
+
+### Changed
+
+- **Breaking:** `build_creator_fee_withdraw_ixs` takes a `payer`, which signs the
+  sweeps and must be the transaction's fee payer.
+- **Breaking:** `PoolInfo` gained the four fields above, so struct literals need
+  them.
+
 ## 0.7.0 - 2026-11-02
 
 ### Fixed

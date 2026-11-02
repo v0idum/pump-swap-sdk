@@ -60,11 +60,28 @@ pub struct PoolInfo {
     /// must not move the price. Zero for pools that predate the field or never
     /// accrued any.
     ///
-    /// This moves with the vault balance on every v2 trade and sweep, so it
-    /// goes stale along with the rest of a [`PoolInfo`] held across trades.
+    /// This moves with the vault balance on every v2 trade and sweep, so a
+    /// [`PoolInfo`] held across trades goes stale.
+    /// [`PumpSwapClient::fetch_pool_snapshot`](crate::client::PumpSwapClient::fetch_pool_snapshot)
+    /// reads both together.
     ///
     /// See [`PoolInfo::effective_reserves`].
     pub virtual_quote_reserves: i128,
+    /// The pool's own creator fee rate for a coin on a custom pair, or 0 when
+    /// the standard schedule applies, which is always so for SOL and USDC pairs.
+    ///
+    /// [`can_quote_fees`](crate::math::can_quote_fees) already excludes every
+    /// pair this can apply to.
+    pub creator_fee_bps: u64,
+    /// True when the coin's creator fee goes to its holders rather than a
+    /// creator wallet.
+    pub is_holder_reward: bool,
+    /// Protocol fee kept by v2 trades, waiting in the quote vault for a sweep.
+    /// pump.fun runs that sweep itself.
+    pub protocol_fees: u64,
+    /// Creator fee kept by v2 trades, waiting in the quote vault for a sweep.
+    /// See [`sweep_pool_creator_fee_instruction`](crate::instruction::sweep_pool_creator_fee_instruction).
+    pub creator_fees: u64,
     /// SPL Token program that owns the base mint (`spl_token::ID` or `spl_token_2022::ID`).
     pub base_token_program: Pubkey,
     /// SPL Token program that owns the quote mint (`spl_token::ID` or `spl_token_2022::ID`).
@@ -177,6 +194,20 @@ impl PoolInfo {
             .map(i128::from_le_bytes)
             .unwrap_or(0);
 
+        // Appended after it in this order, with a reserved `can_edit_creator_fee`
+        // byte before `is_holder_reward`. Older accounts end before them.
+        let trailing_u64 = |offset: usize| {
+            data.get(offset..offset + 8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_le_bytes)
+                .unwrap_or(0)
+        };
+        let reserves_end = pool_size + 24;
+        let creator_fee_bps = trailing_u64(reserves_end);
+        let is_holder_reward = data.get(reserves_end + 9).is_some_and(|byte| *byte != 0);
+        let protocol_fees = trailing_u64(reserves_end + 10);
+        let creator_fees = trailing_u64(reserves_end + 18);
+
         Ok(Self {
             pool,
             pool_account_data_len: data.len(),
@@ -190,6 +221,10 @@ impl PoolInfo {
             is_mayhem_mode: pool_data.is_mayhem_mode != 0,
             is_cashback_coin: pool_data.is_cashback_coin != 0,
             virtual_quote_reserves,
+            creator_fee_bps,
+            is_holder_reward,
+            protocol_fees,
+            creator_fees,
             base_token_program,
             quote_token_program,
         })
@@ -210,6 +245,27 @@ impl PoolInfo {
                 .clamp(0, u64::MAX as i128) as u64,
         )
     }
+}
+
+/// Anchor account discriminator for pump.fun's `BondingCurve`.
+const BONDING_CURVE_DISCRIMINATOR: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
+
+/// Byte offset of `creator_fee` in a pump.fun `BondingCurve` account.
+const BONDING_CURVE_CREATOR_FEE_OFFSET: usize = 125;
+
+/// The creator fee waiting on a pump.fun bonding curve for a sweep.
+///
+/// `data` is the raw account. One written before the field existed is shorter,
+/// and has nothing waiting.
+pub fn bonding_curve_creator_fee(data: &[u8]) -> Result<u64> {
+    if data.get(..8) != Some(&BONDING_CURVE_DISCRIMINATOR[..]) {
+        anyhow::bail!("not a pump.fun BondingCurve account");
+    }
+    Ok(data
+        .get(BONDING_CURVE_CREATOR_FEE_OFFSET..BONDING_CURVE_CREATOR_FEE_OFFSET + 8)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0))
 }
 
 /// Anchor account discriminator for pump-amm's `GlobalConfig`.
