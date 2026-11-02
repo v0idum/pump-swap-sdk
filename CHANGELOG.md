@@ -18,6 +18,23 @@
   An account ending inside the 16-byte field now decodes it as zero rather than
   reading the bytes that are there.
 
+- **Twelve advisories cleared out of `Cargo.lock`.** All transitive, and no
+  manifest requirement changed:
+  `rustls` 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349),
+  `rustls-webpki` 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382),
+  `webpki-root-certs` 1.0.9 -> 1.0.11 (RUSTSEC-2026-0383),
+  `webpki-roots` 1.0.9 -> 1.0.11 (RUSTSEC-2026-0381),
+  `zstd` 0.13.3 -> 0.13.4 (RUSTSEC-2026-0391),
+  `zstd-safe` 7.2.4 -> 7.4.0 (RUSTSEC-2026-0398, -0403),
+  `zstd-sys` 2.0.15 -> 2.1.2 (RUSTSEC-2026-0410) and
+  `crypto-bigint` 0.5.5 -> 0.7.10 (RUSTSEC-2026-0387).
+
+  `crypto-bigint` is reached through `solana-secp256k1-recover`, whose 3.3.1
+  moves to `k256` 0.14. That graph needs `hybrid-array` ^0.4.13, so
+  `hybrid-array` moved to 0.4.15 first, taking `typenum` to 1.20.1.
+  RUSTSEC-2026-0258 stays ignored in CI, as it has no fix available from this
+  repo.
+
 ### Changed
 
 - **Breaking:** `PoolInfo::virtual_quote_reserves` is now `i128`, not `u64`.
