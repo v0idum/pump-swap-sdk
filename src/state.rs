@@ -48,19 +48,23 @@ pub struct PoolInfo {
     pub coin_creator: Pubkey,
     pub is_mayhem_mode: bool,
     pub is_cashback_coin: bool,
-    /// Quote-side liquidity the program prices against but the pool's quote
-    /// token account does not hold.
+    /// Signed adjustment between the pool's quote token account balance and
+    /// the quote reserve the program prices against.
     ///
-    /// A `u64` stored immediately after `is_cashback_coin`, present in the
-    /// live account layout but **absent from the published IDL**, so
-    /// [`Pool`] does not carry it. pump-amm adds it to the quote token
-    /// account balance both when stepping the constant product and when
-    /// computing the pool's market cap for fee-tier selection; ignoring it
-    /// misprices affected pools by orders of magnitude. Zero for pools that
-    /// predate the field or never accrued any.
+    /// An `i128` stored immediately after `is_cashback_coin`, which [`Pool`]
+    /// does not carry. pump-amm adds it to the quote token account balance
+    /// both when stepping the constant product and when computing the pool's
+    /// market cap for fee-tier selection; ignoring it misprices affected pools
+    /// by orders of magnitude. Positive on boosted pools. Negative when fees
+    /// kept by v2 trades sit in the vault awaiting a sweep, because that money
+    /// must not move the price. Zero for pools that predate the field or never
+    /// accrued any.
+    ///
+    /// This moves with the vault balance on every v2 trade and sweep, so it
+    /// goes stale along with the rest of a [`PoolInfo`] held across trades.
     ///
     /// See [`PoolInfo::effective_reserves`].
-    pub virtual_quote_reserves: u64,
+    pub virtual_quote_reserves: i128,
     /// SPL Token program that owns the base mint (`spl_token::ID` or `spl_token_2022::ID`).
     pub base_token_program: Pubkey,
     /// SPL Token program that owns the quote mint (`spl_token::ID` or `spl_token_2022::ID`).
@@ -103,8 +107,8 @@ impl PoolInfo {
     /// `(base_reserve, quote_reserve)` amounts.
     ///
     /// These are the raw token-account balances. To price a swap, use
-    /// [`Self::effective_reserves`] first — the program prices against more
-    /// quote than the token account holds whenever
+    /// [`Self::effective_reserves`] first — the program prices against a
+    /// different quote reserve than the token account holds whenever
     /// [`Self::virtual_quote_reserves`] is non-zero.
     pub fn orient_reserves(&self, base_reserve: u64, quote_reserve: u64) -> (u64, u64) {
         match self.token_side() {
@@ -164,13 +168,13 @@ impl PoolInfo {
         }
         let pool_data = *bytemuck::from_bytes::<Pool>(&data[8..pool_size + 8]);
 
-        // A `u64` the live layout carries immediately after
-        // `is_cashback_coin`, absent from the published IDL and from older,
-        // shorter accounts. See [`Self::virtual_quote_reserves`].
+        // An `i128` the live layout carries immediately after
+        // `is_cashback_coin`, absent from older, shorter accounts. See
+        // [`Self::virtual_quote_reserves`].
         let virtual_quote_reserves = data
-            .get(pool_size + 8..pool_size + 16)
-            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-            .map(u64::from_le_bytes)
+            .get(pool_size + 8..pool_size + 24)
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+            .map(i128::from_le_bytes)
             .unwrap_or(0);
 
         Ok(Self {
@@ -192,12 +196,18 @@ impl PoolInfo {
     }
 
     /// The `(base, quote)` reserves pump-amm actually prices against: raw
-    /// token-account balances with [`Self::virtual_quote_reserves`] added to
-    /// the quote side.
+    /// token-account balances with the signed
+    /// [`Self::virtual_quote_reserves`] added to the quote side.
+    ///
+    /// The program keeps the sum within `u64` for a pool and vault read
+    /// together. A pair read at different slots can fall outside it, so the
+    /// result is clamped to that range rather than wrapped.
     pub fn effective_reserves(&self, base_reserve: u64, quote_reserve: u64) -> (u64, u64) {
         (
             base_reserve,
-            quote_reserve.saturating_add(self.virtual_quote_reserves),
+            (quote_reserve as i128)
+                .saturating_add(self.virtual_quote_reserves)
+                .clamp(0, u64::MAX as i128) as u64,
         )
     }
 }

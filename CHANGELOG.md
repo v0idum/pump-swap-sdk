@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Pools with negative `virtual_quote_reserves` were quoted against a reserve
+  of `u64::MAX`.** The field is an `i128`, but the SDK read its low 8 bytes as a
+  `u64`, so a negative value decoded as a number near `u64::MAX` and
+  `effective_reserves` saturated. Pump has allowed negative values since
+  2026-09-30: v2 trades keep fees in the quote vault and subtract them here. The
+  field is now decoded as an `i128` and added with its sign.
+
+  `effective_reserves` clamps the result to the `u64` range. The program
+  guarantees the sum is in range for a pool and vault read together, but the SDK
+  reads them in separate RPC calls.
+
+  An account ending inside the 16-byte field now decodes it as zero rather than
+  reading the bytes that are there.
+
+### Changed
+
+- **Breaking:** `PoolInfo::virtual_quote_reserves` is now `i128`, not `u64`.
+
 ## 0.6.0 - 2026-09-20
 
 ### Fixed

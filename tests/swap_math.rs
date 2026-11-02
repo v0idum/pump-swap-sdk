@@ -359,6 +359,55 @@ fn effective_reserves_add_virtual_liquidity_to_the_quote_side_only() {
     assert!(sol_base.sol_is_base());
 }
 
+/// A real pool account with its `i128` at offset 245 replaced, since no
+/// negative pool has been captured as a fixture yet.
+fn pool_with_virtual_quote_reserves(virtual_quote_reserves: i128) -> PoolInfo {
+    let mut data = POOL_VIRTUAL.to_vec();
+    data[245..261].copy_from_slice(&virtual_quote_reserves.to_le_bytes());
+    decode_pool(&data)
+}
+
+/// The worked example in pump's `VIRTUAL_QUOTE_RESERVES_FEE_ADJUSTMENT.md`: a
+/// v2 buy leaves 110 SOL in the vault, 0.03 SOL of it fees kept out of the price.
+#[test]
+fn effective_reserves_subtract_negative_virtual_reserves() {
+    let pool = pool_with_virtual_quote_reserves(-30_000_000);
+    assert_eq!(
+        pool.effective_reserves(1_000, 110_000_000_000),
+        (1_000, 109_970_000_000)
+    );
+}
+
+/// The program keeps the sum in `u64` range only for a pool and vault read
+/// together. The SDK reads them in separate RPC calls, so a stale pair can land
+/// outside it, and must not wrap into a reserve billions of times too large.
+#[test]
+fn effective_reserves_stay_in_range_for_a_stale_pool_and_vault_pair() {
+    let negative = pool_with_virtual_quote_reserves(-30_000_000);
+    assert_eq!(negative.effective_reserves(1_000, 10_000_000), (1_000, 0));
+
+    let positive = pool_with_virtual_quote_reserves(1);
+    assert_eq!(
+        positive.effective_reserves(1_000, u64::MAX),
+        (1_000, u64::MAX)
+    );
+
+    let largest = pool_with_virtual_quote_reserves(i128::MAX);
+    assert_eq!(largest.effective_reserves(1_000, 1), (1_000, u64::MAX));
+}
+
+/// Accounts ending inside the 16-byte field predate it; reading the bytes that
+/// are there would produce a value the program never stored.
+#[test]
+fn pool_decoding_ignores_an_account_ending_inside_the_field() {
+    let mut data = POOL_VIRTUAL.to_vec();
+    data.truncate(253);
+    assert_eq!(
+        decode_pool(&data).effective_reserves(1_000, 2_000),
+        (1_000, 2_000)
+    );
+}
+
 /// Raw pool account for `FtY9RJrMc4EvQBxG2kGr1Sj7WkVXcPAFVrHbso8oztbh`: a
 /// pump pool (it carries a `coin_creator`) quoted in something other than
 /// SOL. The fee program prices it off neither ladder — live swaps show
