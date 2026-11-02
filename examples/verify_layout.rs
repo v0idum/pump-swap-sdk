@@ -56,7 +56,8 @@ async fn main() -> Result<()> {
         pool_info.base_token_program,
         pool_info.quote_token_program,
     );
-    let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
+    let (pool_info, (base_vault, quote_vault)) = client.fetch_pool_snapshot(&pool_info).await?;
+    let (base_reserve, quote_reserve) = pool_info.effective_reserves(base_vault, quote_vault);
     println!("reserves: base={base_reserve} quote={quote_reserve}");
 
     // Small amount so the layout check works against typical test wallets.

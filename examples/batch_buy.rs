@@ -68,7 +68,8 @@ async fn main() -> Result<()> {
         if i > 0 {
             sleep(Duration::from_millis(interval_ms)).await;
         }
-        let (base_reserve, quote_reserve) = client.fetch_pool_reserves(&pool_info).await?;
+        let (pool_info, (base_vault, quote_vault)) = client.fetch_pool_snapshot(&pool_info).await?;
+        let (base_reserve, quote_reserve) = pool_info.effective_reserves(base_vault, quote_vault);
         let amount_out = calc_amount_out(amount_in, quote_reserve, base_reserve, slippage);
         let mut ixs = vec![
             ComputeBudgetInstruction::set_compute_unit_limit(1_000_000),

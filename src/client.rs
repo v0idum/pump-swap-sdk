@@ -9,7 +9,8 @@ use crate::instruction::{
     make_close_user_volume_accumulator_instruction, make_collect_coin_creator_fee_instruction,
     make_deposit_instruction, make_extend_account_instruction,
     make_init_user_volume_accumulator_instruction, make_sell_instruction,
-    make_sync_user_volume_accumulator_instruction, transfer_creator_fees_to_pump_instruction,
+    make_sync_user_volume_accumulator_instruction, sweep_bonding_curve_creator_fee_instruction,
+    sweep_pool_creator_fee_instruction, transfer_creator_fees_to_pump_instruction,
     transfer_creator_fees_to_pump_v2_instruction, withdraw_instruction,
 };
 use crate::math::{
@@ -18,12 +19,12 @@ use crate::math::{
 };
 use crate::state::{
     FeeConfig, Fees, GlobalConfig, GlobalVolumeAccumulator, PoolInfo, SharingConfig,
-    UserVolumeAccumulator,
+    UserVolumeAccumulator, bonding_curve_creator_fee,
 };
 use crate::util::{
-    calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
-    create_ata_token_or_not_with_program, fee_config_pda, find_user_vol_accumulator,
-    gen_pubkey_with_seed, load_pool, sharing_config_pda,
+    bonding_curve_pda, calc_lp_mint_pda, calc_pool_pda_with_index, calc_user_pool_token_account,
+    canonical_pool_pda, create_ata_token_or_not_with_program, fee_config_pda,
+    find_user_vol_accumulator, gen_pubkey_with_seed, load_pool, sharing_config_pda,
 };
 use anyhow::{Result, anyhow};
 use log::{debug, info};
@@ -305,9 +306,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         pool: &PoolInfo,
         slippage: f64,
     ) -> Result<SwapQuote> {
-        let reserves = self.fetch_pool_reserves(pool).await?;
-        let fees = self.fetch_pool_fees(pool, reserves.0, reserves.1).await?;
-        Ok(token_buy_quote(sol_in, reserves, pool, fees, slippage))
+        let (pool, reserves) = self.fetch_pool_snapshot(pool).await?;
+        let fees = self.fetch_pool_fees(&pool, reserves.0, reserves.1).await?;
+        Ok(token_buy_quote(sol_in, reserves, &pool, fees, slippage))
     }
 
     /// Quote "spend exactly `tokens_in` base units, receive lamports" against
@@ -318,12 +319,52 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         pool: &PoolInfo,
         slippage: f64,
     ) -> Result<SwapQuote> {
-        let reserves = self.fetch_pool_reserves(pool).await?;
-        let fees = self.fetch_pool_fees(pool, reserves.0, reserves.1).await?;
-        Ok(token_sell_quote(tokens_in, reserves, pool, fees, slippage))
+        let (pool, reserves) = self.fetch_pool_snapshot(pool).await?;
+        let fees = self.fetch_pool_fees(&pool, reserves.0, reserves.1).await?;
+        Ok(token_sell_quote(tokens_in, reserves, &pool, fees, slippage))
+    }
+
+    /// Read a pool and both its vaults together, in one RPC call so they come
+    /// from the same slot, returning the current [`PoolInfo`] and the raw
+    /// `(base, quote)` vault balances.
+    ///
+    /// Use this before pricing. [`PoolInfo::virtual_quote_reserves`] moves on
+    /// every v2 trade and sweep, so it only prices correctly alongside vault
+    /// balances from the same moment. Pass the result to
+    /// [`PoolInfo::effective_reserves`].
+    ///
+    /// `pool` supplies the addresses and token programs, which do not change.
+    pub async fn fetch_pool_snapshot(&self, pool: &PoolInfo) -> Result<(PoolInfo, (u64, u64))> {
+        let keys = [
+            pool.pool,
+            pool.pool_base_token_account,
+            pool.pool_quote_token_account,
+        ];
+        let accounts = self.rpc.get_multiple_accounts(&keys).await?;
+        let account = |index: usize| {
+            accounts
+                .get(index)
+                .and_then(|account| account.as_ref())
+                .ok_or_else(|| anyhow!("account {} not found", keys[index]))
+        };
+        let current = PoolInfo::from_account_data(
+            pool.pool,
+            &account(0)?.data,
+            pool.base_token_program,
+            pool.quote_token_program,
+        )?;
+        let reserves = (
+            token_account_amount(&account(1)?.data)?,
+            token_account_amount(&account(2)?.data)?,
+        );
+        Ok((current, reserves))
     }
 
     /// Fetch raw base/quote reserves (in token base units) for a pool.
+    ///
+    /// Balances only: the quote vault includes fees waiting for a sweep, so do
+    /// not read it as liquidity. To price a trade, use
+    /// [`Self::fetch_pool_snapshot`].
     pub async fn fetch_pool_reserves(&self, pool: &PoolInfo) -> Result<(u64, u64)> {
         let base_reserve = self
             .rpc
@@ -387,7 +428,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         amount_in: u64,
         keypair: &Keypair,
     ) -> Result<()> {
-        let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
+        let (pool_info, (base_reserve, quote_reserve)) =
+            self.fetch_pool_snapshot(pool_info).await?;
+        let pool_info = &pool_info;
         let fees = self
             .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
             .await?;
@@ -418,7 +461,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         amount_in: u64,
         keypair: &Keypair,
     ) -> Result<()> {
-        let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
+        let (pool_info, (base_reserve, quote_reserve)) =
+            self.fetch_pool_snapshot(pool_info).await?;
+        let pool_info = &pool_info;
         let fees = self
             .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
             .await?;
@@ -625,7 +670,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// own transaction from [`Self::build_buy_ixs`] plus your own
     /// `ComputeBudgetInstruction`s.
     pub async fn buy(&self, amount_in: u64, pool_info: &PoolInfo, payer: &Keypair) -> Result<()> {
-        let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
+        let (pool_info, (base_reserve, quote_reserve)) =
+            self.fetch_pool_snapshot(pool_info).await?;
+        let pool_info = &pool_info;
         let fees = self
             .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
             .await?;
@@ -791,6 +838,10 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// `CreatorVaultMigratedToSharingConfig` — so route those through
     /// [`Self::build_creator_fee_withdraw_ixs`] instead.
     /// [`PoolInfo::fee_sharing_config`] tells the two apart.
+    ///
+    /// This collects what is already in the vault. Fees that v2 trades kept in
+    /// a pool get there only through a sweep, so prefer
+    /// [`Self::build_collect_pool_creator_fee_ixs`], which adds one.
     pub fn build_collect_coin_creator_fee_ixs(
         &self,
         coin_creator: &Pubkey,
@@ -819,6 +870,38 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             quote_mint,
             quote_token_program,
             &coin_creator_token_account,
+        )?);
+        Ok(instructions)
+    }
+
+    /// [`Self::build_collect_coin_creator_fee_ixs`] for one pool, preceded by a
+    /// sweep of that pool's waiting creator fee.
+    ///
+    /// The vault is shared by all of a creator's pools, but the sweep is per
+    /// pool, so a creator with several pools needs one sweep for each of them.
+    ///
+    /// Errors for a fee-sharing pool, which pump-amm does not let collect. Use
+    /// [`Self::build_creator_fee_withdraw_ixs`] for those.
+    pub fn build_collect_pool_creator_fee_ixs(
+        &self,
+        pool: &PoolInfo,
+        payer: &Pubkey,
+        create_coin_creator_ata: bool,
+    ) -> Result<Vec<Instruction>> {
+        if pool.fee_sharing_config().is_some() {
+            anyhow::bail!(
+                "pool {} pays creator fees through a SharingConfig, which pump-amm rejects \
+                 here; use build_creator_fee_withdraw_ixs",
+                pool.pool
+            );
+        }
+        let mut instructions = vec![sweep_pool_creator_fee_instruction(payer, pool)?];
+        instructions.extend(self.build_collect_coin_creator_fee_ixs(
+            &pool.coin_creator,
+            payer,
+            &pool.quote_mint,
+            &pool.quote_token_program,
+            create_coin_creator_ata,
         )?);
         Ok(instructions)
     }
@@ -931,7 +1014,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
     /// own transaction from [`Self::build_sell_ixs`] plus your own
     /// `ComputeBudgetInstruction`s.
     pub async fn sell(&self, amount_in: u64, pool_info: &PoolInfo, payer: &Keypair) -> Result<()> {
-        let (base_reserve, quote_reserve) = self.fetch_pool_reserves(pool_info).await?;
+        let (pool_info, (base_reserve, quote_reserve)) =
+            self.fetch_pool_snapshot(pool_info).await?;
+        let pool_info = &pool_info;
         let fees = self
             .fetch_pool_fees(pool_info, base_reserve, quote_reserve)
             .await?;
@@ -958,9 +1043,9 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         Ok(())
     }
 
-    /// Withdraw a fee-sharing coin's accrued creator fees: sweep the pump-amm
-    /// coin-creator vault into pump.fun's creator vault, then pay the coin's
-    /// shareholders out of it.
+    /// Withdraw a fee-sharing coin's accrued creator fees: sweep what v2 trades
+    /// kept, move the pump-amm coin-creator vault into pump.fun's creator vault,
+    /// then pay the coin's shareholders out of it.
     ///
     /// `admin` only signs and pays — the flow is permissionless, and the
     /// shareholders are whoever the coin's
@@ -975,7 +1060,10 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             ComputeBudgetInstruction::set_compute_unit_limit(500_000),
             ComputeBudgetInstruction::set_compute_unit_price(50_000),
         ];
-        instructions.extend(self.build_creator_fee_withdraw_ixs(token_mint).await?);
+        instructions.extend(
+            self.build_creator_fee_withdraw_ixs(&admin.pubkey(), token_mint)
+                .await?,
+        );
         let mut tx = Transaction::new_with_payer(&instructions, Some(&admin.pubkey()));
         tx.sign(&[admin], self.rpc.get_latest_blockhash().await?);
         let result = self.rpc.send_and_confirm_transaction(&tx).await?;
@@ -983,33 +1071,101 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         Ok(())
     }
 
-    /// Compose the two-instruction WSOL creator-fee payout for a fee-sharing
-    /// coin: `transfer_creator_fees_to_pump` followed by
-    /// `distribute_creator_fees`.
+    /// Compose the WSOL creator-fee payout for a fee-sharing coin: the sweeps
+    /// from [`Self::build_creator_fee_sweep_ixs`], then
+    /// `transfer_creator_fees_to_pump` and `distribute_creator_fees`.
+    ///
+    /// `payer` signs and funds the sweeps, and must be the transaction's fee
+    /// payer. Keep these together in one transaction: pump.fun rejects the
+    /// payout with `CreatorFeesNotSwept` if a trade leaves a fee on the curve
+    /// after a sweep in an earlier one.
     ///
     /// Fetches the coin's [`SharingConfig`] to
     /// fill in the shareholder accounts, which
     /// `distribute_creator_fees` requires verbatim and in order. Errors when
     /// the coin has no config — a coin whose fees go to a single creator
-    /// collects them with [`Self::build_collect_coin_creator_fee_ixs`]
+    /// collects them with [`Self::build_collect_pool_creator_fee_ixs`]
     /// instead — and when the config is not
     /// [`Active`](crate::state::ConfigStatus::Active), which the program
     /// rejects with `SharingConfigNotActive`.
     ///
-    /// Both instructions no-op or fail on an empty vault: the sweep skips a
+    /// The last two no-op or fail on an empty vault: the transfer skips a
     /// balance below the token-account rent minimum, and the payout requires
     /// the vault to hold at least pump.fun's minimum distributable amount.
     ///
     /// For a non-WSOL quote mint use [`Self::build_creator_fee_withdraw_ixs_v2`].
     pub async fn build_creator_fee_withdraw_ixs(
         &self,
+        payer: &Pubkey,
         token_mint: &Pubkey,
     ) -> Result<Vec<Instruction>> {
         let shareholders = self.active_shareholders(token_mint).await?;
-        Ok(vec![
-            transfer_creator_fees_to_pump_instruction(&sharing_config_pda(token_mint))?,
-            distribute_creator_fees_instruction(token_mint, &shareholders)?,
-        ])
+        let mut instructions = self
+            .build_creator_fee_sweep_ixs(payer, token_mint, &WRAPPED_SOL_MINT, &spl_token::ID)
+            .await?;
+        instructions.push(transfer_creator_fees_to_pump_instruction(
+            &sharing_config_pda(token_mint),
+        )?);
+        instructions.push(distribute_creator_fees_instruction(
+            token_mint,
+            &shareholders,
+        )?);
+        Ok(instructions)
+    }
+
+    /// Sweep a fee-sharing coin's waiting creator fees into its vaults.
+    ///
+    /// A coin still on its curve gets a curve sweep. A graduated coin gets a
+    /// pool sweep, plus a curve sweep only if a fee is left on the curve.
+    ///
+    /// Sweeps that new trades could make necessary always run, even with
+    /// nothing waiting now, because a read could be outdated by the time the
+    /// transaction lands. The curve of a graduated coin takes no more trades, so
+    /// skipping its sweep is safe, and it saves the space a full payout needs.
+    ///
+    /// A payout to 10 shareholders with both sweeps exceeds the transaction
+    /// size limit. Send these in their own transaction first; a graduated coin's
+    /// curve cannot gain a fee before the payout lands.
+    pub async fn build_creator_fee_sweep_ixs(
+        &self,
+        payer: &Pubkey,
+        token_mint: &Pubkey,
+        quote_mint: &Pubkey,
+        quote_token_program: &Pubkey,
+    ) -> Result<Vec<Instruction>> {
+        let pool = canonical_pool_pda(token_mint, quote_mint);
+        let accounts = self
+            .rpc
+            .get_multiple_accounts(&[bonding_curve_pda(token_mint), pool])
+            .await?;
+        let curve_fee = match &accounts[0] {
+            Some(curve) => bonding_curve_creator_fee(&curve.data)?,
+            None => 0,
+        };
+        let graduated_pool = accounts[1].as_ref();
+
+        let mut instructions = Vec::new();
+        if graduated_pool.is_none() || curve_fee > 0 {
+            instructions.push(sweep_bonding_curve_creator_fee_instruction(
+                payer,
+                token_mint,
+                &sharing_config_pda(token_mint),
+                quote_mint,
+                quote_token_program,
+            )?);
+        }
+        if let Some(account) = graduated_pool {
+            // The sweep reads only the quote side, so the base token program
+            // given here does not reach the instruction.
+            let pool = PoolInfo::from_account_data(
+                pool,
+                &account.data,
+                *quote_token_program,
+                *quote_token_program,
+            )?;
+            instructions.push(sweep_pool_creator_fee_instruction(payer, &pool)?);
+        }
+        Ok(instructions)
     }
 
     /// [`Self::build_creator_fee_withdraw_ixs`] for a coin quoted in something
@@ -1028,22 +1184,24 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
         initialize_shareholder_atas: bool,
     ) -> Result<Vec<Instruction>> {
         let shareholders = self.active_shareholders(token_mint).await?;
-        Ok(vec![
-            transfer_creator_fees_to_pump_v2_instruction(
-                payer,
-                &sharing_config_pda(token_mint),
-                quote_mint,
-                quote_token_program,
-            )?,
-            distribute_creator_fees_v2_instruction(
-                payer,
-                token_mint,
-                quote_mint,
-                quote_token_program,
-                initialize_shareholder_atas,
-                &shareholders,
-            )?,
-        ])
+        let mut instructions = self
+            .build_creator_fee_sweep_ixs(payer, token_mint, quote_mint, quote_token_program)
+            .await?;
+        instructions.push(transfer_creator_fees_to_pump_v2_instruction(
+            payer,
+            &sharing_config_pda(token_mint),
+            quote_mint,
+            quote_token_program,
+        )?);
+        instructions.push(distribute_creator_fees_v2_instruction(
+            payer,
+            token_mint,
+            quote_mint,
+            quote_token_program,
+            initialize_shareholder_atas,
+            &shareholders,
+        )?);
+        Ok(instructions)
     }
 
     /// Shareholder addresses of `token_mint`'s sharing config, in stored
@@ -1055,7 +1213,7 @@ impl<T: Deref<Target = RpcClient>> PumpSwapClient<T> {
             .ok_or_else(|| {
                 anyhow!(
                     "{token_mint} has no SharingConfig at {}; its creator fees are not split, \
-                     collect them with build_collect_coin_creator_fee_ixs",
+                     collect them with build_collect_pool_creator_fee_ixs",
                     sharing_config_pda(token_mint)
                 )
             })?;
@@ -1522,6 +1680,15 @@ pub async fn get_token_balance(
     }
 }
 
+/// The `amount` of an SPL token account, at the same offset under Token and
+/// Token-2022.
+fn token_account_amount(data: &[u8]) -> Result<u64> {
+    data.get(64..72)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| anyhow!("token account too short: {} bytes", data.len()))
+}
+
 /// Supply field of an SPL Token / Token-2022 mint account.
 ///
 /// Both layouts share the same first 82 bytes, so the offset holds for
@@ -1561,6 +1728,10 @@ mod orientation_tests {
             is_mayhem_mode: false,
             is_cashback_coin: false,
             virtual_quote_reserves: 0,
+            creator_fee_bps: 0,
+            is_holder_reward: false,
+            protocol_fees: 0,
+            creator_fees: 0,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
         }
@@ -1756,6 +1927,10 @@ mod extend_account_gate_tests {
             is_mayhem_mode: false,
             is_cashback_coin: false,
             virtual_quote_reserves: 0,
+            creator_fee_bps: 0,
+            is_holder_reward: false,
+            protocol_fees: 0,
+            creator_fees: 0,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
         }

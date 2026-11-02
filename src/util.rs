@@ -384,6 +384,24 @@ pub fn pump_creator_vault_pda(creator: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &PUMPFUN_PROGRAM).0
 }
 
+/// PDA: `["pool-authority", mint]` under pump.fun.
+///
+/// The `creator` of the pump-amm pool a coin graduates into, which is what
+/// makes that pool's address derivable from the mint. See
+/// [`canonical_pool_pda`].
+pub fn pump_pool_authority_pda(mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pool-authority", mint.as_ref()], &PUMPFUN_PROGRAM).0
+}
+
+/// Address of the pump-amm pool `mint` graduates into: index 0, created by
+/// [`pump_pool_authority_pda`], with `mint` as base.
+///
+/// The address derives whether or not the coin has graduated, so check that
+/// the account exists.
+pub fn canonical_pool_pda(mint: &Pubkey, quote_mint: &Pubkey) -> Pubkey {
+    calc_pool_pda(&pump_pool_authority_pda(mint), mint, quote_mint).0
+}
+
 /// PDA: `["metadata", metaplex_program, mint]` under the
 /// [`TOKEN_METADATA_PROGRAM`].
 ///

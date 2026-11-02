@@ -7,6 +7,9 @@ pub const PUMP_SWAP_PROGRAM_ID: Pubkey = pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWp
 /// pump.fun bonding-curve program — used for creator-fee distribution.
 pub const PUMPFUN_PROGRAM: Pubkey = pubkey!("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 
+/// pump.fun `Global` account, PDA `["global"]` under [`PUMPFUN_PROGRAM`].
+pub const PUMPFUN_GLOBAL: Pubkey = pubkey!("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf");
+
 /// pump.fun event-authority PDA — used by the bonding-curve program's
 /// `distribute_creator_fees` instruction.
 pub const PUMPFUN_EVENT_AUTHORITY: Pubkey = pubkey!("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1");

@@ -1,6 +1,6 @@
 use crate::constants::{
     EVENT_AUTHORITY, FEE_PROGRAM, GLOBAL_CONFIG, GLOBAL_VOLUME_ACCUMULATOR, PUMP_SWAP_PROGRAM_ID,
-    PUMPFUN_EVENT_AUTHORITY, PUMPFUN_PROGRAM, WRAPPED_SOL_MINT,
+    PUMPFUN_EVENT_AUTHORITY, PUMPFUN_GLOBAL, PUMPFUN_PROGRAM, WRAPPED_SOL_MINT,
 };
 use crate::state::PoolInfo;
 use crate::util::{
@@ -840,6 +840,9 @@ pub fn withdraw_instruction(
 /// [`calc_pool_pda_with_index`](crate::util::calc_pool_pda_with_index)
 /// derives it when the pool address is not already at hand.
 ///
+/// pump-amm rejects this with `CreatorFeesNotSwept` while a creator fee is
+/// waiting in the pool, so run [`sweep_pool_creator_fee_instruction`] first.
+///
 /// Afterwards the pool's fees leave through
 /// [`transfer_creator_fees_to_pump_instruction`] rather than
 /// `collect_coin_creator_fee`, which pump-amm rejects for a migrated pool with
@@ -989,6 +992,101 @@ pub fn transfer_creator_fees_to_pump_v2_instruction(
     })
 }
 
+/// Build the pump-amm `sweep_creator_fee` instruction, which pays
+/// [`PoolInfo::creator_fees`] out of the pool's quote vault into the
+/// coin-creator vault.
+///
+/// v2 trades keep the creator fee in the pool, so it reaches the vault only
+/// through this instruction. Run it in the same transaction as
+/// `collect_coin_creator_fee` or `transfer_creator_fees_to_pump`.
+///
+/// Permissionless. `payer` funds the vault's quote ATA when it is missing and
+/// a rent top-up when the pool has an older layout. A sweep with nothing
+/// waiting succeeds and moves nothing.
+///
+/// 12 accounts, discriminator `[32, 246, 191, 52, 8, 201, 73, 186]`.
+pub fn sweep_pool_creator_fee_instruction(payer: &Pubkey, pool: &PoolInfo) -> Result<Instruction> {
+    let recipient = find_coin_creator_vault_authority(&pool.coin_creator);
+
+    let accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(GLOBAL_CONFIG, false),
+        AccountMeta::new(pool.pool, false),
+        AccountMeta::new_readonly(pool.quote_mint, false),
+        AccountMeta::new_readonly(pool.quote_token_program, false),
+        AccountMeta::new(pool.pool_quote_token_account, false),
+        AccountMeta::new_readonly(recipient, false),
+        AccountMeta::new(
+            find_coin_creator_vault_ata(&recipient, &pool.quote_token_program, &pool.quote_mint),
+            false,
+        ),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+        AccountMeta::new_readonly(EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMP_SWAP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_SWAP_PROGRAM_ID,
+        accounts,
+        data: vec![32, 246, 191, 52, 8, 201, 73, 186],
+    })
+}
+
+/// Build the pump.fun `sweep_creator_fee` instruction, which pays the fee kept
+/// on `mint`'s bonding curve into `["creator-vault", creator]`.
+///
+/// pump.fun's `distribute_creator_fees` fails with `CreatorFeesNotSwept` while
+/// a fee is waiting here, so this comes first in the same transaction. It also
+/// works after the coin has graduated, because migration does not move waiting
+/// fees.
+///
+/// `creator` is `BondingCurve.creator`, which for a fee-sharing coin is its
+/// [`sharing_config_pda`]. `quote_mint` is WSOL for a SOL-paired coin.
+///
+/// Permissionless. `payer` funds any account the sweep has to create or top up
+/// for rent. A sweep with nothing waiting succeeds and moves nothing.
+///
+/// 13 accounts, discriminator `[32, 246, 191, 52, 8, 201, 73, 186]`.
+pub fn sweep_bonding_curve_creator_fee_instruction(
+    payer: &Pubkey,
+    mint: &Pubkey,
+    creator: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_token_program: &Pubkey,
+) -> Result<Instruction> {
+    let bonding_curve = bonding_curve_pda(mint);
+    let recipient = pump_creator_vault_pda(creator);
+
+    let accounts = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(PUMPFUN_GLOBAL, false),
+        AccountMeta::new_readonly(*mint, false),
+        AccountMeta::new_readonly(*quote_mint, false),
+        AccountMeta::new_readonly(*quote_token_program, false),
+        AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new(bonding_curve, false),
+        AccountMeta::new(
+            find_coin_creator_vault_ata(&bonding_curve, quote_token_program, quote_mint),
+            false,
+        ),
+        AccountMeta::new(recipient, false),
+        AccountMeta::new(
+            find_coin_creator_vault_ata(&recipient, quote_token_program, quote_mint),
+            false,
+        ),
+        AccountMeta::new_readonly(PUMPFUN_EVENT_AUTHORITY, false),
+        AccountMeta::new_readonly(PUMPFUN_PROGRAM, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMPFUN_PROGRAM,
+        accounts,
+        data: vec![32, 246, 191, 52, 8, 201, 73, 186],
+    })
+}
+
 /// pump.fun `distribute_creator_fees` — pays the coin's accrued creator fees
 /// out of pump.fun's creator vault to the coin's shareholders, as lamports.
 ///
@@ -1115,6 +1213,10 @@ mod tests {
             is_mayhem_mode: false,
             is_cashback_coin,
             virtual_quote_reserves: 0,
+            creator_fee_bps: 0,
+            is_holder_reward: false,
+            protocol_fees: 0,
+            creator_fees: 0,
             base_token_program: spl_token::ID,
             quote_token_program: spl_token::ID,
         }
