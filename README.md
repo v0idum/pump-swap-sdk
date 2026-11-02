@@ -223,12 +223,13 @@ floor it will accept. Three things the raw constant product misses:
 - **Per-component rounding.** The lp, protocol and creator shares are each
   rounded up separately, so the fee is up to two units more than one rounded-up
   calculation on the combined rate.
-- **Virtual quote liquidity.** Pool accounts carry a `u64` past
-  `is_cashback_coin` that the published IDL does not list, and the program adds
-  it to the quote token-account balance both when stepping the curve and when
-  computing market cap. `PoolInfo::virtual_quote_reserves` exposes it and
-  `effective_reserves` applies it; a pool carrying it is mispriced by orders of
-  magnitude without it.
+- **Virtual quote reserves.** Pool accounts carry an `i128` past
+  `is_cashback_coin`, and the program adds it to the quote token-account balance
+  both when stepping the curve and when computing market cap. It is negative
+  when fees kept by v2 trades are waiting in the vault.
+  `PoolInfo::virtual_quote_reserves` exposes it and `effective_reserves` applies
+  it; a pool carrying it is mispriced without it. It changes on every v2 trade
+  and sweep, so reload a `PoolInfo` you hold across trades.
 
 Fee schedule and pricing rules are pinned by `tests/swap_math.rs`, which
 replays byte-for-byte mainnet swap events through this math offline. The

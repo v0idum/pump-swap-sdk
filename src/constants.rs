@@ -43,8 +43,9 @@ pub const GLOBAL_CONFIG: Pubkey = pubkey!("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QC
 /// Size in bytes of a current pool account, Anchor discriminator included.
 ///
 /// Live mainnet pools allocate 301 bytes: an 8-byte discriminator, the
-/// 237-byte [`Pool`](crate::Pool) struct, the 8-byte undocumented
-/// `virtual_quote_reserves` that follows it, and trailing reserved space.
+/// 237-byte [`Pool`](crate::Pool) struct, the 16-byte
+/// `virtual_quote_reserves` that follows it, and trailing fields and reserved
+/// space.
 /// Pools allocated before the layout was extended are shorter — the
 /// `pool_legacy_short.bin` fixture is a real 271-byte one — and the
 /// high-level build helpers prepend `extend_account` for them.
